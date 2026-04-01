@@ -7,6 +7,14 @@ OpenClaw 智能辦公室是以 `搜索 -> 整理 -> 輸出` 為核心的本地�
 - `api/`：FastAPI 後端、SQLite metadata、FTS5 全文搜索
 - `samples/`：可直接拿來試跑的本地資料夾範例
 
+## 開發前先讀
+
+所有後續開發與修改，都必須先閱讀以下文件，並以 `docs/development-guidelines.md` 作為第一優先的專案內部開發規範。
+
+1. `OpenClaw_智能辦公室_整體方案書.md`
+2. `docs/development-guidelines.md`
+3. `README.md`
+
 ## 啟動方式
 
 1. 複製 `.env.example` 為 `.env`
