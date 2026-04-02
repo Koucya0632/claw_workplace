@@ -2,7 +2,21 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.repositories.database import ensure_database_ready
-from app.routers import documents, health, reports, search, sources, tasks
+from app.routers import (
+    documents,
+    health,
+    openclaw_agents,
+    openclaw_config,
+    openclaw_devices,
+    openclaw_hooks,
+    openclaw_instances,
+    openclaw_logs,
+    openclaw_operations,
+    reports,
+    search,
+    sources,
+    tasks,
+)
 
 
 def create_app() -> FastAPI:
@@ -27,9 +41,15 @@ def create_app() -> FastAPI:
     app.include_router(documents.router, prefix="/api/v1")
     app.include_router(tasks.router, prefix="/api/v1")
     app.include_router(reports.router, prefix="/api/v1")
+    app.include_router(openclaw_instances.router, prefix="/api/v1")
+    app.include_router(openclaw_agents.router, prefix="/api/v1")
+    app.include_router(openclaw_devices.router, prefix="/api/v1")
+    app.include_router(openclaw_config.router, prefix="/api/v1")
+    app.include_router(openclaw_logs.router, prefix="/api/v1")
+    app.include_router(openclaw_hooks.router, prefix="/api/v1")
+    app.include_router(openclaw_operations.router, prefix="/api/v1")
 
     return app
 
 
 app = create_app()
-

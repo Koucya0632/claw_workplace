@@ -16,6 +16,7 @@ def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
 
     monkeypatch.setenv("OPENCLAW_DATABASE_PATH", str(tmp_path / "test.sqlite3"))
     monkeypatch.setenv("OPENCLAW_LOCAL_SOURCE_BASE_PATH", str(source_root))
+    monkeypatch.setenv("OPENCLAW_SECRET_KEY", "test-openclaw-secret")
     monkeypatch.setenv("OPENCLAW_LLM_PROVIDER", "minimax")
     monkeypatch.setenv("MINIMAX_API_KEY", "")
     monkeypatch.setenv("MINIMAX_API_URL", "")
@@ -33,4 +34,3 @@ def client(app_env: dict[str, Path]) -> TestClient:
     from app.main import create_app
 
     return TestClient(create_app())
-

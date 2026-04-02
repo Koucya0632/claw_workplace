@@ -5,6 +5,7 @@ OpenClaw 智能辦公室是以 `搜索 -> 整理 -> 輸出` 為核心的本地�
 
 - `web/`：Next.js 像素風多角色工作台
 - `api/`：FastAPI 後端、SQLite metadata、FTS5 全文搜索
+- `openclaw management`：OpenClaw Instance / Agents / Devices / Config / Logs / Hooks 管理台
 - `samples/`：可直接拿來試跑的本地資料夾範例
 
 ## 開發前先讀
@@ -63,3 +64,28 @@ MINIMAX_API_KEY=你的金鑰
 MINIMAX_API_URL=https://api.minimaxi.com/v1/chat/completions
 MINIMAX_MODEL=MiniMax-M2.5
 ```
+
+## OpenClaw 管理整合 Phase 1
+
+本專案已新增 `OpenClaw 管理` 區域，提供：
+
+- OpenClaw Instance 建立、編輯、健康檢查
+- Agents / Devices / Config / Logs 管理 API 與前端頁面
+- `/hooks/agent`、`/hooks/wake` 手動派發入口
+- 本專案自己的操作審計紀錄與快照摘要
+
+### 啟用前提
+
+- API 執行環境需可呼叫 `openclaw` CLI
+- API 與 OpenClaw Gateway 之間需可連線
+- 若要保存 Gateway token，必須設定 `OPENCLAW_SECRET_KEY`
+
+### OpenClaw 相關環境變數
+
+```bash
+OPENCLAW_CLI_BIN=openclaw
+OPENCLAW_CLI_TIMEOUT_SECONDS=20
+OPENCLAW_SECRET_KEY=請填入一組固定密鑰
+```
+
+若未設定 `OPENCLAW_SECRET_KEY`，仍可建立 Instance，但帶 token 的建立或更新操作會被拒絕。

@@ -38,3 +38,9 @@ def json_loads(value: str | None, fallback: Any) -> Any:
         return fallback
     return json.loads(value)
 
+
+def truncate_text(value: str, max_length: int = 240) -> str:
+    # 審計與錯誤摘要只保留前段內容，避免把大量輸出直接塞進資料庫。
+    if len(value) <= max_length:
+        return value
+    return f"{value[: max_length - 3]}..."

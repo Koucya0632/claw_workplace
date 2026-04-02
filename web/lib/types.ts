@@ -98,3 +98,94 @@ export interface MarkdownReportResponse {
   markdown: string;
 }
 
+export interface OpenClawApiError {
+  message: string;
+  detail?: string | null;
+}
+
+export interface OpenClawApiMeta {
+  instanceId?: string | null;
+  sourceMode?: string | null;
+  durationMs?: number | null;
+}
+
+export interface OpenClawApiResponse<T> {
+  success: boolean;
+  data: T;
+  error?: OpenClawApiError | null;
+  meta: OpenClawApiMeta;
+}
+
+export interface OpenClawInstanceSnapshotSummary {
+  health_status?: string | null;
+  agent_count: number;
+  device_count: number;
+  config_updated_at?: string | null;
+}
+
+export interface OpenClawInstanceResponse {
+  id: string;
+  name: string;
+  gateway_url: string;
+  is_active: boolean;
+  has_token: boolean;
+  last_health_status?: string | null;
+  last_health_checked_at?: string | null;
+  snapshot_summary: OpenClawInstanceSnapshotSummary;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OpenClawHealthResponse {
+  status: string;
+  checked_at: string;
+  details: Record<string, unknown>;
+}
+
+export interface OpenClawOperationLogRecord {
+  id: string;
+  instance_id?: string | null;
+  operation_type: string;
+  target_type: string;
+  target_id?: string | null;
+  status: string;
+  error_message?: string | null;
+  request_summary: Record<string, unknown>;
+  response_summary?: Record<string, unknown> | null;
+  source_mode: string;
+  created_at: string;
+}
+
+export interface OpenClawAgentSummary {
+  id: string;
+  name: string;
+  status: string;
+  channel_count: number;
+  metadata: Record<string, unknown>;
+}
+
+export interface OpenClawDeviceSummary {
+  id: string;
+  name: string;
+  status: string;
+  platform?: string | null;
+  pending_action?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface OpenClawConfigResponse {
+  path: string;
+  value: unknown;
+}
+
+export interface OpenClawConfigValidationResponse {
+  valid: boolean;
+  messages: string[];
+}
+
+export interface OpenClawLogEntry {
+  timestamp?: string | null;
+  level?: string | null;
+  message: string;
+  raw?: string | null;
+}

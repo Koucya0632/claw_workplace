@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Query, status
+
+from app.routers.openclaw_router_utils import openclaw_error_response
+from app.schemas.openclaw_agent import OpenClawAgentCreateRequest
+from app.schemas.openclaw_common import OpenClawApiResponse, build_openclaw_success_response
+from app.services.openclaw_service import OpenClawManagementService
+
+
+router = APIRouter(tags=["openclaw"])
+
+management_service = OpenClawManagementService()
+
+
+@router.get("/openclaw/agents", response_model=OpenClawApiResponse)
+def list_openclaw_agents(instance_id: str = Query(..., alias="instanceId")):
+    try:
+        agents, duration_ms = management_service.list_agents(instance_id)
+        return build_openclaw_success_response(
+            agents,
+            instance_id=instance_id,
+            source_mode=management_service.cli_adapter.source_mode,
+            duration_ms=duration_ms,
+        )
+    except Exception as error:  # noqa: BLE001
+        return openclaw_error_response(error, instance_id=instance_id)
+
+
+@router.post("/openclaw/agents", response_model=OpenClawApiResponse, status_code=status.HTTP_201_CREATED)
+def create_openclaw_agent(payload: OpenClawAgentCreateRequest):
+    try:
+        agent, duration_ms = management_service.create_agent(payload)
+        return build_openclaw_success_response(
+            agent,
+            instance_id=payload.instance_id,
+            source_mode=management_service.cli_adapter.source_mode,
+            duration_ms=duration_ms,
+        )
+    except Exception as error:  # noqa: BLE001
+        return openclaw_error_response(error, instance_id=payload.instance_id)

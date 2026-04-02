@@ -100,6 +100,52 @@ SCHEMA_STATEMENTS = [
     CREATE VIRTUAL TABLE IF NOT EXISTS document_chunks_fts
     USING fts5(chunk_id UNINDEXED, document_id UNINDEXED, filename, content)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS openclaw_instances (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        gateway_url TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        last_health_status TEXT,
+        last_health_checked_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS openclaw_instance_secrets (
+        instance_id TEXT PRIMARY KEY,
+        encrypted_token TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(instance_id) REFERENCES openclaw_instances(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS openclaw_cached_snapshots (
+        instance_id TEXT NOT NULL,
+        snapshot_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(instance_id, snapshot_type),
+        FOREIGN KEY(instance_id) REFERENCES openclaw_instances(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS openclaw_operation_logs (
+        id TEXT PRIMARY KEY,
+        instance_id TEXT,
+        operation_type TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        target_id TEXT,
+        status TEXT NOT NULL,
+        error_message TEXT,
+        request_summary TEXT NOT NULL,
+        response_summary TEXT,
+        source_mode TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(instance_id) REFERENCES openclaw_instances(id) ON DELETE SET NULL
+    )
+    """,
 ]
 
 
@@ -130,4 +176,3 @@ def get_connection() -> Iterator[sqlite3.Connection]:
         connection.commit()
     finally:
         connection.close()
-

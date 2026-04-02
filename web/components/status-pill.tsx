@@ -8,9 +8,12 @@ const COLOR_MAP: Record<string, string> = {
   ready: "bg-mint text-ink",
   running: "bg-gold text-ink",
   completed: "bg-teal text-white",
+  success: "bg-teal text-white",
+  healthy: "bg-mint text-ink",
   failed: "bg-coral text-white",
   scanning: "bg-gold text-ink",
   pending: "bg-slate-200 text-slate-700",
+  unknown: "bg-slate-100 text-slate-600",
   upcoming: "bg-slate-100 text-slate-500",
   disabled: "bg-slate-100 text-slate-500"
 };
@@ -28,4 +31,3 @@ export function StatusPill({ status }: StatusPillProps) {
     </span>
   );
 }
-
