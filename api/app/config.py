@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     # 摘要前先限制輸入長度，避免超長文件直接打爆模型配額與請求時間。
     summary_max_chars: int = Field(default=16000, alias="OPENCLAW_SUMMARY_MAX_CHARS")
 
+    # OpenClaw 管理整合 Phase 1 透過 CLI 與 Hooks 對 Gateway 溝通。
+    openclaw_cli_bin: str = Field(default="openclaw", alias="OPENCLAW_CLI_BIN")
+    openclaw_cli_timeout_seconds: int = Field(default=20, alias="OPENCLAW_CLI_TIMEOUT_SECONDS")
+    openclaw_secret_key: str = Field(default="", alias="OPENCLAW_SECRET_KEY")
+
     # LLM provider 先保留抽象，只在這一版預設選 minimax。
     llm_provider: str = Field(default="minimax", alias="OPENCLAW_LLM_PROVIDER")
     minimax_api_key: str = Field(default="", alias="MINIMAX_API_KEY")

@@ -1,5 +1,14 @@
 import type {
   DocumentSummary,
+  OpenClawAgentSummary,
+  OpenClawApiResponse,
+  OpenClawConfigResponse,
+  OpenClawConfigValidationResponse,
+  OpenClawDeviceSummary,
+  OpenClawHealthResponse,
+  OpenClawInstanceResponse,
+  OpenClawLogEntry,
+  OpenClawOperationLogRecord,
   MarkdownReportResponse,
   ScanSourceResponse,
   SearchRequest,
@@ -27,6 +36,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+async function requestOpenClaw<T>(path: string, init?: RequestInit): Promise<T> {
+  // OpenClaw 管理 API 使用 envelope，因此這裡先統一解包再把錯誤丟出去。
+  const payload = await request<OpenClawApiResponse<T>>(path, init);
+
+  if (!payload.success) {
+    throw new Error(payload.error?.detail ?? payload.error?.message ?? "OpenClaw API request failed");
+  }
+
+  return payload.data;
 }
 
 export async function fetchSources() {
@@ -78,5 +98,147 @@ export async function exportMarkdownReport(taskId: string) {
   return request<MarkdownReportResponse>("/reports/markdown", {
     method: "POST",
     body: JSON.stringify({ task_id: taskId })
+  });
+}
+
+export async function fetchOpenClawInstances() {
+  return requestOpenClaw<OpenClawInstanceResponse[]>("/openclaw/instances");
+}
+
+export async function createOpenClawInstance(payload: {
+  name: string;
+  gateway_url: string;
+  token?: string;
+  is_active?: boolean;
+}) {
+  return requestOpenClaw<OpenClawInstanceResponse>("/openclaw/instances", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateOpenClawInstance(
+  instanceId: string,
+  payload: {
+    name?: string;
+    gateway_url?: string;
+    token?: string;
+    clear_token?: boolean;
+    is_active?: boolean;
+  }
+) {
+  return requestOpenClaw<OpenClawInstanceResponse>(`/openclaw/instances/${instanceId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchOpenClawHealth(instanceId: string) {
+  return requestOpenClaw<OpenClawHealthResponse>(`/openclaw/instances/${instanceId}/health`);
+}
+
+export async function fetchOpenClawOperations(limit = 20, instanceId?: string) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (instanceId) {
+    params.set("instanceId", instanceId);
+  }
+
+  return requestOpenClaw<OpenClawOperationLogRecord[]>(`/openclaw/operations?${params.toString()}`);
+}
+
+export async function fetchOpenClawAgents(instanceId: string) {
+  const params = new URLSearchParams({ instanceId });
+  return requestOpenClaw<OpenClawAgentSummary[]>(`/openclaw/agents?${params.toString()}`);
+}
+
+export async function createOpenClawAgent(payload: {
+  instance_id: string;
+  name: string;
+  prompt?: string;
+  role_hint?: string;
+  metadata?: Record<string, unknown>;
+}) {
+  return requestOpenClaw<OpenClawAgentSummary>("/openclaw/agents", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchOpenClawDevices(instanceId: string) {
+  const params = new URLSearchParams({ instanceId });
+  return requestOpenClaw<OpenClawDeviceSummary[]>(`/openclaw/devices?${params.toString()}`);
+}
+
+export async function runOpenClawDeviceAction(
+  action: "approve" | "reject" | "revoke",
+  deviceId: string,
+  instanceId: string
+) {
+  return requestOpenClaw<Record<string, unknown>>(`/openclaw/devices/${deviceId}/${action}`, {
+    method: "POST",
+    body: JSON.stringify({ instance_id: instanceId })
+  });
+}
+
+export async function fetchOpenClawConfig(instanceId: string, path: string) {
+  const params = new URLSearchParams({ instanceId, path });
+  return requestOpenClaw<OpenClawConfigResponse>(`/openclaw/config?${params.toString()}`);
+}
+
+export async function setOpenClawConfig(payload: {
+  instance_id: string;
+  path: string;
+  value: unknown;
+}) {
+  return requestOpenClaw<OpenClawConfigResponse>("/openclaw/config/set", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function validateOpenClawConfig(payload: {
+  instance_id: string;
+  path: string;
+  value: unknown;
+}) {
+  return requestOpenClaw<OpenClawConfigValidationResponse>("/openclaw/config/validate", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchOpenClawLogs(instanceId: string, limit = 200) {
+  const params = new URLSearchParams({ instanceId, limit: String(limit) });
+  return requestOpenClaw<OpenClawLogEntry[]>(`/openclaw/logs?${params.toString()}`);
+}
+
+export async function dispatchOpenClawAgentHook(payload: {
+  instance_id: string;
+  agent_id: string;
+  session_key: string;
+  message: string;
+  deliver?: boolean;
+  channel?: string;
+  to?: string;
+  metadata?: Record<string, unknown>;
+}) {
+  return requestOpenClaw<Record<string, unknown>>("/openclaw/hooks/agent", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function dispatchOpenClawWakeHook(payload: {
+  instance_id: string;
+  agent_id: string;
+  session_key: string;
+  deliver?: boolean;
+  channel?: string;
+  to?: string;
+  metadata?: Record<string, unknown>;
+}) {
+  return requestOpenClaw<Record<string, unknown>>("/openclaw/hooks/wake", {
+    method: "POST",
+    body: JSON.stringify(payload)
   });
 }

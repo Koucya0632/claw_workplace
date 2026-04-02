@@ -10,7 +10,8 @@ const NAV_ITEMS = [
   { href: "/search", label: "搜索" },
   { href: "/analysis", label: "分析" },
   { href: "/report", label: "報告" },
-  { href: "/settings/sources", label: "資料源" }
+  { href: "/settings/sources", label: "資料源" },
+  { href: "/openclaw", label: "OpenClaw 管理" }
 ];
 
 export function Navigation() {
@@ -28,7 +29,7 @@ export function Navigation() {
         </div>
         <div className="flex flex-wrap gap-2">
           {NAV_ITEMS.map((item) => {
-            const active = pathname === item.href;
+            const active = item.href === "/" ? pathname === item.href : pathname.startsWith(item.href);
             return (
               <Link
                 key={item.href}
