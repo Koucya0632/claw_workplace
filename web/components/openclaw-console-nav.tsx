@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { href: "/openclaw", label: "總覽" },
   { href: "/openclaw/instances", label: "實例" },
   { href: "/openclaw/agents", label: "Agents" },
+  { href: "/openclaw/workflow", label: "Workflow" },
   { href: "/openclaw/devices", label: "Devices" },
   { href: "/openclaw/config", label: "Config" },
   { href: "/openclaw/logs", label: "Logs" },

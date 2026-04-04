@@ -4,6 +4,7 @@ import time
 from typing import Any, Optional, Tuple
 
 from app.config import get_settings
+from app.repositories.openclaw_agent_capability_repository import OpenClawAgentCapabilityRepository
 from app.repositories.openclaw_instance_repository import OpenClawInstanceRepository
 from app.repositories.openclaw_operation_log_repository import OpenClawOperationLogRepository
 from app.schemas.openclaw_agent import OpenClawAgentCreateRequest, OpenClawAgentSummary
@@ -149,12 +150,14 @@ class OpenClawManagementService:
     def __init__(
         self,
         repository: Optional[OpenClawInstanceRepository] = None,
+        capability_repository: Optional[OpenClawAgentCapabilityRepository] = None,
         operation_log_repository: Optional[OpenClawOperationLogRepository] = None,
         cli_adapter: Optional[OpenClawCliAdapter] = None,
         secret_cipher: Optional[OpenClawSecretCipher] = None,
     ) -> None:
         settings = get_settings()
         self.repository = repository or OpenClawInstanceRepository()
+        self.capability_repository = capability_repository or OpenClawAgentCapabilityRepository()
         self.operation_log_repository = operation_log_repository or OpenClawOperationLogRepository()
         self.cli_adapter = cli_adapter or OpenClawCliAdapter()
         self.secret_cipher = secret_cipher or OpenClawSecretCipher(settings.openclaw_secret_key)
@@ -163,7 +166,11 @@ class OpenClawManagementService:
         started_at = time.perf_counter()
         instance, token = self._load_context(instance_id)
         try:
-            agents = [self._to_agent_summary(item) for item in self.cli_adapter.list_agents(instance, token)]
+            capability_map = _build_capability_summary_map(self.capability_repository.list_for_instance(instance_id=instance_id))
+            agents = [
+                self._to_agent_summary(item, capability_summary=capability_map.get(str(item.get("id") or item.get("agent_id") or ""), {}))
+                for item in self.cli_adapter.list_agents(instance, token)
+            ]
             self.repository.upsert_snapshot(instance_id, "agents", {"items": [agent.model_dump() for agent in agents]})
             self._log_success(
                 instance_id=instance_id,
@@ -442,15 +449,26 @@ class OpenClawManagementService:
             source_mode=error.source_mode or self.cli_adapter.source_mode,
         )
 
-    def _to_agent_summary(self, payload: dict[str, Any]) -> OpenClawAgentSummary:
+    def _to_agent_summary(
+        self,
+        payload: dict[str, Any],
+        *,
+        capability_summary: Optional[dict[str, dict[str, Any]]] = None,
+    ) -> OpenClawAgentSummary:
         bindings = payload.get("bindings")
         channel_count = len(bindings) if isinstance(bindings, list) else int(payload.get("channel_count", 0))
+        metadata = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"id", "agent_id", "name", "display_name", "status", "bindings", "channel_count"}
+        }
+        metadata["capabilities"] = capability_summary or {}
         return OpenClawAgentSummary(
             id=str(payload.get("id") or payload.get("agent_id") or ""),
             name=str(payload.get("name") or payload.get("display_name") or "Unnamed Agent"),
             status=str(payload.get("status") or "unknown"),
             channel_count=channel_count,
-            metadata={key: value for key, value in payload.items() if key not in {"id", "agent_id", "name", "display_name", "status", "bindings", "channel_count"}},
+            metadata=metadata,
         )
 
     def _to_device_summary(self, payload: dict[str, Any]) -> OpenClawDeviceSummary:
@@ -488,3 +506,23 @@ def _coerce_messages(payload: dict[str, Any]) -> list[str]:
     if "message" in payload:
         return [str(payload["message"])]
     return []
+
+
+def _build_capability_summary_map(records: list[Any]) -> dict[str, dict[str, dict[str, Any]]]:
+    summary: dict[str, dict[str, dict[str, Any]]] = {}
+    for record in records:
+        config = record.config if isinstance(record.config, dict) else {}
+        native = config.get("_native_plugin") if isinstance(config.get("_native_plugin"), dict) else {}
+        summary.setdefault(record.agent_id, {})[record.capability_key] = {
+            "enabled": record.is_enabled,
+            "config": {key: value for key, value in config.items() if key != "_native_plugin"},
+            "plugin_id": native.get("plugin_id"),
+            "plugin_ready": bool(native.get("plugin_ready")),
+            "plugin_enabled": bool(native.get("plugin_enabled")),
+            "bridge_ready": bool(native.get("bridge_ready")),
+            "last_sync_status": native.get("last_sync_status"),
+            "last_sync_message": native.get("last_sync_message"),
+            "synced_at": native.get("synced_at"),
+            "updated_at": record.updated_at.isoformat(),
+        }
+    return summary

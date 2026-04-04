@@ -146,6 +146,80 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY(instance_id) REFERENCES openclaw_instances(id) ON DELETE SET NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS openclaw_agent_capabilities (
+        id TEXT PRIMARY KEY,
+        instance_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        capability_key TEXT NOT NULL,
+        is_enabled INTEGER NOT NULL DEFAULT 0,
+        config_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(instance_id, agent_id, capability_key),
+        FOREIGN KEY(instance_id) REFERENCES openclaw_instances(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS openclaw_workflow_configs (
+        instance_id TEXT PRIMARY KEY,
+        search_agent_id TEXT NOT NULL,
+        analysis_agent_id TEXT NOT NULL,
+        report_agent_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(instance_id) REFERENCES openclaw_instances(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workflow_runs (
+        id TEXT PRIMARY KEY,
+        instance_id TEXT NOT NULL,
+        workflow_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        current_stage TEXT,
+        active_agent_id TEXT,
+        overall_progress_percent INTEGER NOT NULL DEFAULT 0,
+        input_payload TEXT NOT NULL,
+        final_report_json TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(instance_id) REFERENCES openclaw_instances(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workflow_stage_runs (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        stage_key TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        progress_percent INTEGER NOT NULL DEFAULT 0,
+        input_payload TEXT NOT NULL,
+        output_payload TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(run_id, stage_key),
+        FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workflow_events (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        stage_key TEXT,
+        agent_id TEXT,
+        status TEXT NOT NULL,
+        progress_percent INTEGER NOT NULL DEFAULT 0,
+        message TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+    )
+    """,
 ]
 
 

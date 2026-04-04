@@ -1,0 +1,47 @@
+{
+  "id": "project-search",
+  "name": "Project Search",
+  "description": "Native project search tools for OpenClaw Smart Office.",
+  "enabledByDefault": false,
+  "contracts": {
+    "tools": [
+      "project_search",
+      "project_document"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiBaseUrl": {
+        "type": "string",
+        "minLength": 1
+      },
+      "timeoutMs": {
+        "type": "number",
+        "minimum": 1000
+      },
+      "enabledAgents": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "apiBaseUrl": {
+      "label": "Agent Tools API Base URL",
+      "help": "Base URL for OpenClaw Smart Office agent tool bridge."
+    },
+    "timeoutMs": {
+      "label": "Bridge Timeout",
+      "help": "Timeout in milliseconds for bridge HTTP requests."
+    },
+    "enabledAgents": {
+      "label": "Enabled Agents",
+      "help": "Only these agents can see and call the native project search tools."
+    }
+  }
+}

@@ -18,7 +18,7 @@ class OpenClawHookClient:
         from app.config import get_settings
 
         settings = get_settings()
-        self.timeout_seconds = settings.openclaw_cli_timeout_seconds
+        self.timeout_seconds = settings.openclaw_agent_dispatch_timeout_seconds
         self.binary = settings.openclaw_cli_bin
 
     def dispatch_agent(

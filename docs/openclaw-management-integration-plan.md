@@ -9,12 +9,15 @@
 - 不做 RPC、Channels、Approvals、即時 log stream、SSH、多 auth mode
 - 不做登入與 RBAC，只保留後端集中代理與審計紀錄
 - 新增本專案自己的操作審計 API：`GET /api/v1/openclaw/operations`
+- 已補一條本專案專用的 Agent Search Bridge，並改為透過 repo 內原生 plugin 暴露 native tool
+- Agent 搜索能力採 per-agent opt-in，不預設全開
 
 實際已落地的頁面為：
 
 - `openclaw`
 - `openclaw/instances`
 - `openclaw/agents`
+- `openclaw/workflow`
 - `openclaw/devices`
 - `openclaw/config`
 - `openclaw/logs`

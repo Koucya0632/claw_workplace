@@ -6,7 +6,9 @@ from app.routers import (
     documents,
     health,
     openclaw_agents,
+    openclaw_agent_tools,
     openclaw_config,
+    openclaw_workflow_config,
     openclaw_devices,
     openclaw_hooks,
     openclaw_instances,
@@ -16,6 +18,7 @@ from app.routers import (
     search,
     sources,
     tasks,
+    workflows,
 )
 
 
@@ -43,11 +46,14 @@ def create_app() -> FastAPI:
     app.include_router(reports.router, prefix="/api/v1")
     app.include_router(openclaw_instances.router, prefix="/api/v1")
     app.include_router(openclaw_agents.router, prefix="/api/v1")
+    app.include_router(openclaw_agent_tools.router, prefix="/api/v1")
     app.include_router(openclaw_devices.router, prefix="/api/v1")
     app.include_router(openclaw_config.router, prefix="/api/v1")
+    app.include_router(openclaw_workflow_config.router, prefix="/api/v1")
     app.include_router(openclaw_logs.router, prefix="/api/v1")
     app.include_router(openclaw_hooks.router, prefix="/api/v1")
     app.include_router(openclaw_operations.router, prefix="/api/v1")
+    app.include_router(workflows.router, prefix="/api/v1")
 
     return app
 

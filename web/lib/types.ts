@@ -164,6 +164,25 @@ export interface OpenClawAgentSummary {
   metadata: Record<string, unknown>;
 }
 
+export interface OpenClawAgentCapabilityRecord {
+  id: string;
+  instance_id: string;
+  agent_id: string;
+  capability_key: string;
+  is_enabled: boolean;
+  config: Record<string, unknown>;
+  native_plugin_id?: string | null;
+  native_plugin_ready: boolean;
+  native_plugin_enabled: boolean;
+  bridge_ready: boolean;
+  last_sync_status?: string | null;
+  last_sync_message?: string | null;
+  workspace_synced: boolean;
+  message?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface OpenClawDeviceSummary {
   id: string;
   name: string;
@@ -188,4 +207,91 @@ export interface OpenClawLogEntry {
   level?: string | null;
   message: string;
   raw?: string | null;
+}
+
+export interface OpenClawWorkflowConfigResponse {
+  instance_id: string;
+  search_agent_id: string;
+  analysis_agent_id: string;
+  report_agent_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowSearchDocumentItem {
+  document_id: string;
+  filename: string;
+  relative_path: string;
+  source_id: string;
+  source_name: string;
+  snippet: string;
+  reason: string;
+}
+
+export interface WorkflowEvidenceItem {
+  document_id: string;
+  filename: string;
+  quote: string;
+  reason: string;
+}
+
+export interface WorkflowReportSection {
+  title: string;
+  summary: string;
+  bullets: string[];
+  body: string;
+}
+
+export interface WorkflowReportPayload {
+  title: string;
+  executive_summary: string;
+  highlights: string[];
+  recommendations: string[];
+  evidence: WorkflowEvidenceItem[];
+  sections: WorkflowReportSection[];
+  appendix: string[];
+  markdown: string;
+}
+
+export interface WorkflowStageRun {
+  id: string;
+  stage_key: string;
+  agent_id: string;
+  status: string;
+  progress_percent: number;
+  input_payload: Record<string, unknown>;
+  output_payload?: Record<string, unknown> | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowEvent {
+  id: string;
+  run_id: string;
+  stage_key?: string | null;
+  agent_id?: string | null;
+  status: string;
+  progress_percent: number;
+  message: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface WorkflowRunResponse {
+  id: string;
+  instance_id: string;
+  workflow_type: string;
+  status: string;
+  current_stage?: string | null;
+  active_agent_id?: string | null;
+  overall_progress_percent: number;
+  input_payload: Record<string, unknown>;
+  final_report?: WorkflowReportPayload | null;
+  error_message?: string | null;
+  stages: WorkflowStageRun[];
+  events: WorkflowEvent[];
+  created_at: string;
+  updated_at: string;
 }

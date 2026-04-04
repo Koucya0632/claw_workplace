@@ -1,6 +1,7 @@
 import type {
   DocumentSummary,
   OpenClawAgentSummary,
+  OpenClawAgentCapabilityRecord,
   OpenClawApiResponse,
   OpenClawConfigResponse,
   OpenClawConfigValidationResponse,
@@ -9,12 +10,14 @@ import type {
   OpenClawInstanceResponse,
   OpenClawLogEntry,
   OpenClawOperationLogRecord,
+  OpenClawWorkflowConfigResponse,
   MarkdownReportResponse,
   ScanSourceResponse,
   SearchRequest,
   SearchResponse,
   SourceResponse,
-  TaskStatusResponse
+  TaskStatusResponse,
+  WorkflowRunResponse
 } from "@/lib/types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -164,6 +167,27 @@ export async function createOpenClawAgent(payload: {
   });
 }
 
+export async function fetchOpenClawAgentCapabilities(instanceId: string, agentId: string) {
+  const params = new URLSearchParams({ instanceId });
+  return requestOpenClaw<OpenClawAgentCapabilityRecord[]>(`/openclaw/agents/${agentId}/capabilities?${params.toString()}`);
+}
+
+export async function updateOpenClawAgentSearchCapability(payload: {
+  instance_id: string;
+  agent_id: string;
+  enabled: boolean;
+  config?: Record<string, unknown>;
+}) {
+  return requestOpenClaw<OpenClawAgentCapabilityRecord>(`/openclaw/agents/${payload.agent_id}/capabilities/search`, {
+    method: "POST",
+    body: JSON.stringify({
+      instance_id: payload.instance_id,
+      enabled: payload.enabled,
+      config: payload.config ?? {}
+    })
+  });
+}
+
 export async function fetchOpenClawDevices(instanceId: string) {
   const params = new URLSearchParams({ instanceId });
   return requestOpenClaw<OpenClawDeviceSummary[]>(`/openclaw/devices?${params.toString()}`);
@@ -241,4 +265,49 @@ export async function dispatchOpenClawWakeHook(payload: {
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+export async function fetchOpenClawWorkflowConfig(instanceId: string) {
+  const params = new URLSearchParams({ instanceId });
+  return requestOpenClaw<OpenClawWorkflowConfigResponse>(`/openclaw/workflow-config?${params.toString()}`);
+}
+
+export async function updateOpenClawWorkflowConfig(payload: {
+  instance_id: string;
+  search_agent_id: string;
+  analysis_agent_id: string;
+  report_agent_id: string;
+}) {
+  return requestOpenClaw<OpenClawWorkflowConfigResponse>("/openclaw/workflow-config", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function createSearchReportWorkflow(payload: {
+  instance_id: string;
+  query: string;
+  source_id?: string;
+}) {
+  return request<WorkflowRunResponse>("/workflows/search-report", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchWorkflowRun(runId: string) {
+  return request<WorkflowRunResponse>(`/workflows/${runId}`);
+}
+
+export async function fetchWorkflowRuns(params?: { instanceId?: string; limit?: number }) {
+  const searchParams = new URLSearchParams();
+  if (params?.instanceId) {
+    searchParams.set("instanceId", params.instanceId);
+  }
+  if (params?.limit) {
+    searchParams.set("limit", String(params.limit));
+  }
+
+  const suffix = searchParams.size > 0 ? `?${searchParams.toString()}` : "";
+  return request<WorkflowRunResponse[]>(`/workflows${suffix}`);
 }
