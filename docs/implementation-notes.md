@@ -26,10 +26,13 @@
 本輪也把原本分離的 `/search`、`/analysis`、`/report` 收斂成以 `/search` 為主入口的 workflow 工作台，重點如下：
 
 - 後端新增 `workflow_runs / workflow_stage_runs / workflow_events` 三張資料表
-- 後端新增 `POST /api/v1/workflows/search-report`、`GET /api/v1/workflows/{run_id}`、`GET /api/v1/workflows`
+- 後端新增 `POST /api/v1/workflows/search-report`、`POST /api/v1/workflows/web-search`、`POST /api/v1/workflows/{run_id}/continue-to-report`、`GET /api/v1/workflows/{run_id}`、`GET /api/v1/workflows`
 - 後端以真實 OpenClaw agents 串行執行 `search -> analysis -> report`
-- 前端 `/search` 會輪詢 workflow run，展示三階段進度、active agent、輸入輸出與事件時間線
+- 後端新增第二種 `web_search` workflow type，使用 `understand -> search -> filter -> format` 四個 stage
+- 前端 `/search` 會輪詢 workflow run，展示各階段進度、active agent、輸入輸出與事件時間線
 - 最終輸出改為結構化報告 + Markdown 並保留整條處理鏈路
+- Web Search 支援自訂主題、網址 / 網站 / 網域、關鍵字、必須包含 / 排除條件、重點整理項與回傳格式
+- Web Search 完成後可一鍵承接到分析 / 報告流程
 - `/analysis`、`/report` 不再是獨立主流程，會導回 `/search?runId=...`
 
 ## 本輪刻意延後

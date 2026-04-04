@@ -12,16 +12,30 @@ import { WorkflowReportPanel } from "@/components/workflow-report-panel";
 import { WorkflowRunList } from "@/components/workflow-run-list";
 import { WorkflowStageBoard } from "@/components/workflow-stage-board";
 import {
+  continueWorkflowToReport,
   createSearchReportWorkflow,
+  createWebSearchWorkflow,
   fetchOpenClawInstances,
   fetchSources,
   fetchWorkflowRun,
   fetchWorkflowRuns
 } from "@/lib/api";
-import type { OpenClawInstanceResponse, SourceResponse, WorkflowRunResponse } from "@/lib/types";
+import type {
+  OpenClawInstanceResponse,
+  SourceResponse,
+  WebSearchOutputFormat,
+  WorkflowRunResponse,
+  WorkflowType
+} from "@/lib/types";
+
+const WEB_OUTPUT_OPTIONS: Array<{ value: WebSearchOutputFormat; label: string }> = [
+  { value: "summary", label: "摘要" },
+  { value: "bullets", label: "條列" },
+  { value: "table", label: "表格" },
+  { value: "comparison", label: "比較" }
+];
 
 function SearchWorkflowPageContent() {
-  // 新版 /search 直接成為搜索-分析-報告的一體化主入口，因此會同時管理查詢、run、輪詢與歷史紀錄。
   const router = useRouter();
   const searchParams = useSearchParams();
   const runIdFromUrl = searchParams.get("runId") ?? "";
@@ -29,12 +43,27 @@ function SearchWorkflowPageContent() {
   const [instances, setInstances] = useState<OpenClawInstanceResponse[]>([]);
   const [sources, setSources] = useState<SourceResponse[]>([]);
   const [selectedInstanceId, setSelectedInstanceId] = useState("");
+  const [workflowMode, setWorkflowMode] = useState<WorkflowType>("search_report");
+
   const [query, setQuery] = useState("");
   const [sourceId, setSourceId] = useState("");
+
+  const [webTopic, setWebTopic] = useState("");
+  const [targetUrlsText, setTargetUrlsText] = useState("");
+  const [targetSitesText, setTargetSitesText] = useState("");
+  const [targetDomainsText, setTargetDomainsText] = useState("");
+  const [keywordsText, setKeywordsText] = useState("");
+  const [mustIncludeText, setMustIncludeText] = useState("");
+  const [mustExcludeText, setMustExcludeText] = useState("");
+  const [focusPointsText, setFocusPointsText] = useState("");
+  const [webOutputFormat, setWebOutputFormat] = useState<WebSearchOutputFormat>("summary");
+  const [includeProjectSources, setIncludeProjectSources] = useState(false);
+  const [resultLimit, setResultLimit] = useState(5);
+
   const [runs, setRuns] = useState<WorkflowRunResponse[]>([]);
   const [activeRun, setActiveRun] = useState<WorkflowRunResponse | null>(null);
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("先指定 Instance、輸入查詢，再讓三階段 agent 自動接棒。");
+  const [message, setMessage] = useState("選擇模式後送出查詢，這裡會即時顯示每個 agent 的工作狀態與處理鏈路。");
   const [isPending, startTransition] = useTransition();
 
   useEffect(() => {
@@ -61,13 +90,17 @@ function SearchWorkflowPageContent() {
 
     startTransition(async () => {
       try {
-        const runPayload = await fetchWorkflowRuns({ instanceId: selectedInstanceId, limit: 12 });
+        const runPayload = await fetchWorkflowRuns({
+          instanceId: selectedInstanceId,
+          workflowType: workflowMode,
+          limit: 12
+        });
         setRuns(runPayload);
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : "無法載入 workflow 歷史");
       }
     });
-  }, [selectedInstanceId, startTransition]);
+  }, [selectedInstanceId, workflowMode, startTransition]);
 
   useEffect(() => {
     if (!runIdFromUrl) {
@@ -78,9 +111,23 @@ function SearchWorkflowPageContent() {
       try {
         const runPayload = await fetchWorkflowRun(runIdFromUrl);
         setActiveRun(runPayload);
+        setWorkflowMode(runPayload.workflow_type);
         setSelectedInstanceId(runPayload.instance_id);
-        setQuery(String(runPayload.input_payload.query ?? ""));
-        setSourceId(String(runPayload.input_payload.source_id ?? ""));
+        hydrateFormsFromRun(runPayload, {
+          setQuery,
+          setSourceId,
+          setWebTopic,
+          setTargetUrlsText,
+          setTargetSitesText,
+          setTargetDomainsText,
+          setKeywordsText,
+          setMustIncludeText,
+          setMustExcludeText,
+          setFocusPointsText,
+          setWebOutputFormat,
+          setIncludeProjectSources,
+          setResultLimit
+        });
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : "無法載入指定 workflow run");
       }
@@ -97,7 +144,7 @@ function SearchWorkflowPageContent() {
         const nextRun = await fetchWorkflowRun(activeRun.id);
         setActiveRun(nextRun);
         if (selectedInstanceId) {
-          setRuns(await fetchWorkflowRuns({ instanceId: selectedInstanceId, limit: 12 }));
+          setRuns(await fetchWorkflowRuns({ instanceId: selectedInstanceId, workflowType: workflowMode, limit: 12 }));
         }
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : "輪詢 workflow run 失敗");
@@ -105,27 +152,59 @@ function SearchWorkflowPageContent() {
     }, 1500);
 
     return () => window.clearInterval(timer);
-  }, [activeRun, selectedInstanceId]);
+  }, [activeRun, selectedInstanceId, workflowMode]);
 
   async function handleStartWorkflow() {
-    if (!selectedInstanceId || !query.trim()) {
-      setError("請先選擇 Instance，並輸入搜索查詢。");
+    setError("");
+
+    if (!selectedInstanceId) {
+      setError("請先選擇 Instance。");
       return;
     }
 
-    setError("");
-    setMessage("已送出工作流，正在啟動搜索 agent。");
+    if (workflowMode === "search_report") {
+      if (!query.trim()) {
+        setError("請先輸入搜索查詢。");
+        return;
+      }
+      setMessage("已送出搜索-分析-報告工作流，正在啟動搜索 agent。");
+    } else {
+      if (!webTopic.trim()) {
+        setError("請先輸入搜尋內容 / 主題。");
+        return;
+      }
+      setMessage("已送出 Web Search 工作流，正在理解搜尋目標。");
+    }
 
     startTransition(async () => {
       try {
-        const runPayload = await createSearchReportWorkflow({
-          instance_id: selectedInstanceId,
-          query: query.trim(),
-          source_id: sourceId || undefined
-        });
+        const runPayload =
+          workflowMode === "search_report"
+            ? await createSearchReportWorkflow({
+                instance_id: selectedInstanceId,
+                query: query.trim(),
+                source_id: sourceId || undefined
+              })
+            : await createWebSearchWorkflow({
+                instance_id: selectedInstanceId,
+                topic: webTopic.trim(),
+                target_urls: parseLineList(targetUrlsText),
+                target_sites: parseLineList(targetSitesText),
+                target_domains: parseLineList(targetDomainsText),
+                keywords: parseLineList(keywordsText),
+                must_include: parseLineList(mustIncludeText),
+                must_exclude: parseLineList(mustExcludeText),
+                focus_points: parseLineList(focusPointsText),
+                output_format: webOutputFormat,
+                include_project_sources: includeProjectSources,
+                source_id: includeProjectSources && sourceId ? sourceId : undefined,
+                result_limit: resultLimit
+              });
+
         setActiveRun(runPayload);
+        setWorkflowMode(runPayload.workflow_type);
         router.replace(`/search?runId=${runPayload.id}`);
-        setRuns(await fetchWorkflowRuns({ instanceId: selectedInstanceId, limit: 12 }));
+        setRuns(await fetchWorkflowRuns({ instanceId: selectedInstanceId, workflowType: runPayload.workflow_type, limit: 12 }));
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : "建立 workflow run 失敗");
       }
@@ -136,6 +215,22 @@ function SearchWorkflowPageContent() {
     try {
       const runPayload = await fetchWorkflowRun(runId);
       setActiveRun(runPayload);
+      setWorkflowMode(runPayload.workflow_type);
+      hydrateFormsFromRun(runPayload, {
+        setQuery,
+        setSourceId,
+        setWebTopic,
+        setTargetUrlsText,
+        setTargetSitesText,
+        setTargetDomainsText,
+        setKeywordsText,
+        setMustIncludeText,
+        setMustExcludeText,
+        setFocusPointsText,
+        setWebOutputFormat,
+        setIncludeProjectSources,
+        setResultLimit
+      });
       router.replace(`/search?runId=${runId}`);
       setMessage("已切換到指定 workflow run。");
     } catch (requestError) {
@@ -143,57 +238,243 @@ function SearchWorkflowPageContent() {
     }
   }
 
-  function handleExportMarkdown() {
-    if (!activeRun?.final_report) {
+  async function handleContinueToReport() {
+    if (!activeRun || activeRun.workflow_type !== "web_search") {
       return;
     }
 
-    const blob = new Blob([activeRun.final_report.markdown], { type: "text/markdown;charset=utf-8" });
+    setError("");
+    setMessage("已收到接續要求，正在建立分析/報告流程。");
+
+    startTransition(async () => {
+      try {
+        const nextRun = await continueWorkflowToReport(activeRun.id);
+        setActiveRun(nextRun);
+        setWorkflowMode(nextRun.workflow_type);
+        router.replace(`/search?runId=${nextRun.id}`);
+        setRuns(await fetchWorkflowRuns({ instanceId: nextRun.instance_id, workflowType: nextRun.workflow_type, limit: 12 }));
+      } catch (requestError) {
+        setError(requestError instanceof Error ? requestError.message : "建立接續 workflow 失敗");
+      }
+    });
+  }
+
+  function handleExportMarkdown() {
+    const markdown = activeRun?.final_report?.markdown ?? activeRun?.final_web_result?.markdown;
+    if (!markdown || !activeRun) {
+      return;
+    }
+
+    const title = activeRun.final_report?.title ?? activeRun.final_web_result?.title ?? activeRun.id;
+    const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${activeRun.final_report.title || activeRun.id}.md`;
+    link.download = `${title}.md`;
     link.click();
     URL.revokeObjectURL(url);
   }
 
-  const workflowRoles = useMemo(() => buildWorkflowRoles(activeRun), [activeRun]);
+  function handleModeChange(nextMode: WorkflowType) {
+    setWorkflowMode(nextMode);
+    setActiveRun(null);
+    setError("");
+    setMessage(
+      nextMode === "search_report"
+        ? "已切回搜索-分析-報告模式。"
+        : "已切到 Web Search 模式，可自訂網址、網站、網域、關鍵字與輸出格式。"
+    );
+    router.replace("/search");
+  }
+
+  const workflowRoles = useMemo(() => buildWorkflowRoles(activeRun, workflowMode), [activeRun, workflowMode]);
+  const activeModeDescription =
+    workflowMode === "search_report"
+      ? "把既有專案索引交給三個 agent 串行完成搜索、分析、報告。"
+      : "先理解外網搜尋目標，再搜尋、過濾並格式化輸出結果。";
 
   return (
     <div className="grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]">
       <RoleSquad roles={workflowRoles} />
 
       <section className="space-y-5">
-        <PixelCard title="搜索-分析-報告工作台" eyebrow="Workflow">
-          <div className="grid gap-4 xl:grid-cols-[220px_220px_minmax(0,1fr)_auto]">
-            <OpenClawInstancePicker instances={instances} value={selectedInstanceId} onChange={setSelectedInstanceId} />
-            <select
-              value={sourceId}
-              onChange={(event) => setSourceId(event.target.value)}
-              className="border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
-            >
-              <option value="">全部資料源</option>
-              {sources.map((source) => (
-                <option key={source.id} value={source.id}>
-                  {source.name}
-                </option>
-              ))}
-            </select>
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="輸入要交給搜索 agent 的查詢"
-              className="border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
+        <PixelCard title="搜索工作台" eyebrow="Workflow">
+          <div className="flex flex-wrap gap-2">
+            <ModeButton
+              label="Project Workflow"
+              active={workflowMode === "search_report"}
+              description="搜索 / 分析 / 報告"
+              onClick={() => handleModeChange("search_report")}
             />
-            <button
-              type="button"
-              onClick={handleStartWorkflow}
-              disabled={!selectedInstanceId || !query.trim() || isPending}
-              className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
-            >
-              {isPending ? "啟動中..." : "啟動流程"}
-            </button>
+            <ModeButton
+              label="Web Search"
+              active={workflowMode === "web_search"}
+              description="理解 / 搜尋 / 過濾 / 輸出"
+              onClick={() => handleModeChange("web_search")}
+            />
           </div>
+
+          <div className="mt-4 grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)]">
+            <OpenClawInstancePicker instances={instances} value={selectedInstanceId} onChange={setSelectedInstanceId} />
+            <div className="border-4 border-ink bg-white px-4 py-3 text-sm text-slate-700">
+              <p className="font-black tracking-[0.08em]">{workflowMode === "search_report" ? "Project Workflow" : "Web Search"}</p>
+              <p className="mt-2 leading-7">{activeModeDescription}</p>
+            </div>
+          </div>
+
+          {workflowMode === "search_report" ? (
+            <div className="mt-4 grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)_auto]">
+              <select
+                value={sourceId}
+                onChange={(event) => setSourceId(event.target.value)}
+                className="border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
+              >
+                <option value="">全部資料源</option>
+                {sources.map((source) => (
+                  <option key={source.id} value={source.id}>
+                    {source.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="輸入要交給搜索 agent 的查詢"
+                className="border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
+              />
+              <button
+                type="button"
+                onClick={handleStartWorkflow}
+                disabled={!selectedInstanceId || !query.trim() || isPending}
+                className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
+              >
+                {isPending ? "啟動中..." : "啟動流程"}
+              </button>
+            </div>
+          ) : (
+            <div className="mt-4 space-y-4">
+              <div className="grid gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(0,0.75fr)]">
+                <textarea
+                  value={webTopic}
+                  onChange={(event) => setWebTopic(event.target.value)}
+                  placeholder="搜尋內容 / 主題"
+                  rows={3}
+                  className="border-4 border-ink bg-white px-4 py-3 text-sm leading-7 outline-none"
+                />
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="space-y-2">
+                    <span className="text-[11px] font-black tracking-[0.12em] text-slate-500">回傳格式</span>
+                    <select
+                      value={webOutputFormat}
+                      onChange={(event) => setWebOutputFormat(event.target.value as WebSearchOutputFormat)}
+                      className="w-full border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
+                    >
+                      {WEB_OUTPUT_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-2">
+                    <span className="text-[11px] font-black tracking-[0.12em] text-slate-500">結果筆數</span>
+                    <select
+                      value={String(resultLimit)}
+                      onChange={(event) => setResultLimit(Number(event.target.value))}
+                      className="w-full border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
+                    >
+                      {[3, 5, 8, 10].map((limit) => (
+                        <option key={limit} value={limit}>
+                          {limit} 筆
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex items-center gap-3 border-4 border-ink bg-sand px-4 py-3">
+                    <input
+                      type="checkbox"
+                      checked={includeProjectSources}
+                      onChange={(event) => setIncludeProjectSources(event.target.checked)}
+                      className="h-4 w-4"
+                    />
+                    <span className="text-sm font-black tracking-[0.08em]">合併專案索引結果</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleStartWorkflow}
+                    disabled={!selectedInstanceId || !webTopic.trim() || isPending}
+                    className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
+                  >
+                    {isPending ? "啟動中..." : "啟動 Web Search"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-3">
+                <WorkflowTextAreaField
+                  label="指定搜尋網址"
+                  value={targetUrlsText}
+                  onChange={setTargetUrlsText}
+                  placeholder="每行一個 URL"
+                />
+                <WorkflowTextAreaField
+                  label="指定搜尋網站"
+                  value={targetSitesText}
+                  onChange={setTargetSitesText}
+                  placeholder="每行一個網站名稱"
+                />
+                <WorkflowTextAreaField
+                  label="指定搜尋網域"
+                  value={targetDomainsText}
+                  onChange={setTargetDomainsText}
+                  placeholder="每行一個網域，例如 example.com"
+                />
+                <WorkflowTextAreaField
+                  label="搜尋關鍵字"
+                  value={keywordsText}
+                  onChange={setKeywordsText}
+                  placeholder="每行一個關鍵字"
+                />
+                <WorkflowTextAreaField
+                  label="必須包含"
+                  value={mustIncludeText}
+                  onChange={setMustIncludeText}
+                  placeholder="每行一個必要條件"
+                />
+                <WorkflowTextAreaField
+                  label="必須排除"
+                  value={mustExcludeText}
+                  onChange={setMustExcludeText}
+                  placeholder="每行一個排除條件"
+                />
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_260px]">
+                <WorkflowTextAreaField
+                  label="需要重點整理的資訊"
+                  value={focusPointsText}
+                  onChange={setFocusPointsText}
+                  placeholder="例如：價格差異、風險、優缺點、官方說法"
+                />
+                <label className="space-y-2">
+                  <span className="text-[11px] font-black tracking-[0.12em] text-slate-500">專案資料源篩選</span>
+                  <select
+                    value={sourceId}
+                    onChange={(event) => setSourceId(event.target.value)}
+                    disabled={!includeProjectSources}
+                    className="w-full border-4 border-ink bg-white px-4 py-3 text-sm outline-none disabled:bg-slate-100"
+                  >
+                    <option value="">全部資料源</option>
+                    {sources.map((source) => (
+                      <option key={source.id} value={source.id}>
+                        {source.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            </div>
+          )}
 
           <div className="mt-4 grid gap-4 xl:grid-cols-[1fr_280px]">
             <div className="border-4 border-ink bg-white p-4 text-sm leading-7 text-slate-700">
@@ -229,16 +510,50 @@ function SearchWorkflowPageContent() {
           <WorkflowEventTimeline events={activeRun?.events ?? []} />
         </div>
 
-        <WorkflowReportPanel run={activeRun} onExportMarkdown={handleExportMarkdown} />
+        <WorkflowReportPanel
+          run={activeRun}
+          onExportMarkdown={handleExportMarkdown}
+          onContinueToReport={activeRun?.workflow_type === "web_search" && activeRun.status === "completed" ? handleContinueToReport : undefined}
+          continueDisabled={isPending}
+        />
       </section>
     </div>
   );
 }
 
-function buildWorkflowRoles(activeRun: WorkflowRunResponse | null) {
-  // 左側角色欄雖然不是主資訊，但會即時反映目前哪個階段最活躍，補強整體可視化節奏。
+function buildWorkflowRoles(activeRun: WorkflowRunResponse | null, workflowMode: WorkflowType) {
+  const activeType = activeRun?.workflow_type ?? workflowMode;
   const stageStatusMap = new Map((activeRun?.stages ?? []).map((stage) => [stage.stage_key, stage.status]));
   const stageAgentMap = new Map((activeRun?.stages ?? []).map((stage) => [stage.stage_key, stage.agent_id]));
+
+  if (activeType === "web_search") {
+    return [
+      {
+        name: "Intent Agent",
+        tagline: stageAgentMap.get("understand") ?? "待配置",
+        status: stageStatusMap.get("understand") ?? "pending",
+        quote: "我會先理解搜尋主題、關鍵字、網址與輸出格式。"
+      },
+      {
+        name: "Search Agent",
+        tagline: stageAgentMap.get("search") ?? "待配置",
+        status: stageStatusMap.get("search") ?? "pending",
+        quote: "我會根據條件搜尋外部網站，必要時再補入專案索引內容。"
+      },
+      {
+        name: "Filter Agent",
+        tagline: stageAgentMap.get("filter") ?? "待配置",
+        status: stageStatusMap.get("filter") ?? "pending",
+        quote: "我會剔除噪音、保留真正相關的來源與重點。"
+      },
+      {
+        name: "Format Agent",
+        tagline: stageAgentMap.get("format") ?? "待配置",
+        status: stageStatusMap.get("format") ?? "pending",
+        quote: "我會把結果整理成摘要、條列、表格或比較格式。"
+      }
+    ];
+  }
 
   return [
     {
@@ -262,8 +577,104 @@ function buildWorkflowRoles(activeRun: WorkflowRunResponse | null) {
   ];
 }
 
+function hydrateFormsFromRun(
+  run: WorkflowRunResponse,
+  setters: {
+    setQuery: (value: string) => void;
+    setSourceId: (value: string) => void;
+    setWebTopic: (value: string) => void;
+    setTargetUrlsText: (value: string) => void;
+    setTargetSitesText: (value: string) => void;
+    setTargetDomainsText: (value: string) => void;
+    setKeywordsText: (value: string) => void;
+    setMustIncludeText: (value: string) => void;
+    setMustExcludeText: (value: string) => void;
+    setFocusPointsText: (value: string) => void;
+    setWebOutputFormat: (value: WebSearchOutputFormat) => void;
+    setIncludeProjectSources: (value: boolean) => void;
+    setResultLimit: (value: number) => void;
+  }
+) {
+  if (run.workflow_type === "web_search") {
+    setters.setWebTopic(String(run.input_payload.topic ?? ""));
+    setters.setTargetUrlsText(joinList(run.input_payload.target_urls));
+    setters.setTargetSitesText(joinList(run.input_payload.target_sites));
+    setters.setTargetDomainsText(joinList(run.input_payload.target_domains));
+    setters.setKeywordsText(joinList(run.input_payload.keywords));
+    setters.setMustIncludeText(joinList(run.input_payload.must_include));
+    setters.setMustExcludeText(joinList(run.input_payload.must_exclude));
+    setters.setFocusPointsText(joinList(run.input_payload.focus_points));
+    setters.setWebOutputFormat((run.input_payload.output_format as WebSearchOutputFormat) ?? "summary");
+    setters.setIncludeProjectSources(Boolean(run.input_payload.include_project_sources));
+    setters.setResultLimit(Number(run.input_payload.result_limit ?? 5));
+    setters.setSourceId(String(run.input_payload.source_id ?? ""));
+    return;
+  }
+
+  setters.setQuery(String(run.input_payload.query ?? ""));
+  setters.setSourceId(String(run.input_payload.source_id ?? ""));
+}
+
+function parseLineList(value: string) {
+  return value
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function joinList(value: unknown) {
+  return Array.isArray(value) ? value.map((item) => String(item)).join("\n") : "";
+}
+
+function ModeButton({
+  label,
+  description,
+  active,
+  onClick
+}: {
+  label: string;
+  description: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`border-4 border-ink px-4 py-3 text-left transition ${active ? "bg-ink text-sand" : "bg-white text-ink"}`}
+    >
+      <p className="text-sm font-black tracking-[0.08em]">{label}</p>
+      <p className={`mt-1 text-xs ${active ? "text-sand/80" : "text-slate-500"}`}>{description}</p>
+    </button>
+  );
+}
+
+function WorkflowTextAreaField({
+  label,
+  value,
+  onChange,
+  placeholder
+}: {
+  label: string;
+  value: string;
+  onChange: (nextValue: string) => void;
+  placeholder: string;
+}) {
+  return (
+    <label className="space-y-2">
+      <span className="text-[11px] font-black tracking-[0.12em] text-slate-500">{label}</span>
+      <textarea
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        rows={4}
+        className="w-full border-4 border-ink bg-white px-4 py-3 text-sm leading-7 outline-none"
+      />
+    </label>
+  );
+}
+
 export default function SearchPage() {
-  // App Router 下若使用 search params，仍需包在 Suspense 內避免 build 失敗。
   return (
     <Suspense fallback={<div className="pixel-panel rounded-none p-6 text-sm text-slate-600">正在載入工作流頁面...</div>}>
       <SearchWorkflowPageContent />

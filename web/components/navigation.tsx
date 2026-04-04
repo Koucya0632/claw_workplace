@@ -8,8 +8,6 @@ import { cn } from "@/lib/utils";
 const NAV_ITEMS = [
   { href: "/", label: "主控台" },
   { href: "/search", label: "搜索" },
-  { href: "/analysis", label: "分析" },
-  { href: "/report", label: "報告" },
   { href: "/settings/sources", label: "資料源" },
   { href: "/openclaw", label: "OpenClaw 管理" }
 ];

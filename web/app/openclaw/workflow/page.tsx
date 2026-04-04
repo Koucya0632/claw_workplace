@@ -10,7 +10,7 @@ import type { OpenClawAgentSummary, OpenClawInstanceResponse } from "@/lib/types
 
 const WORKFLOW_ROLES = [
   { name: "Chief Lobster", tagline: "流程編排", status: "running", quote: "我會先確認這個 Instance 的三階段 agent 是否都已就緒。" },
-  { name: "Search Lobster", tagline: "搜索代理", status: "ready", quote: "先指定誰負責搜索，前台工作流才知道第一步交給誰。" },
+  { name: "Search Lobster", tagline: "搜索 / Web Search 代理", status: "ready", quote: "先指定誰負責搜索，`/search` 的 project workflow 與 Web Search 都會先交給這位 agent。" },
   { name: "Analyze Lobster", tagline: "分析代理", status: "ready", quote: "分析 agent 會讀取搜索輸出，再整理重點與風險。" },
   { name: "Report Lobster", tagline: "報告代理", status: "ready", quote: "最後一棒負責把分析結果轉成結構化報告與 Markdown。" }
 ];
@@ -102,7 +102,7 @@ export default function OpenClawWorkflowPage() {
   return (
     <OpenClawPageShell
       title="Workflow Agent Mapping"
-      description="這裡決定一體化流程的三個固定階段要交給哪個 OpenClaw agent。先配置好 mapping，`/search` 的工作流主頁才能真正串起搜索、分析、報告。"
+      description="這裡決定一體化流程的三個固定階段要交給哪個 OpenClaw agent。`search_agent_id` 也會同時負責 `/search` 裡的 Web Search 模式。先配置好 mapping，工作流主頁才能真正串起搜索、分析、報告與條件化 Web Search。"
       roles={WORKFLOW_ROLES}
     >
       <PixelCard title="Workflow 設定" eyebrow="Mapping">

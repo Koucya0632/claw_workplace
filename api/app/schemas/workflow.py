@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 
 WORKFLOW_STAGE_KEYS = ("search", "analysis", "report")
+WORKFLOW_TYPE_SEARCH_REPORT = "search_report"
+WORKFLOW_TYPE_WEB_SEARCH = "web_search"
+WEB_SEARCH_OUTPUT_FORMATS = ("summary", "bullets", "table", "comparison")
 
 
 class WorkflowSearchReportCreateRequest(BaseModel):
@@ -14,6 +17,23 @@ class WorkflowSearchReportCreateRequest(BaseModel):
     instance_id: str
     query: str
     source_id: Optional[str] = None
+
+
+class WorkflowWebSearchCreateRequest(BaseModel):
+    # Web Search 入口會把搜尋主題、條件與輸出格式一次交給 workflow，由 agent 逐階段消化。
+    instance_id: str
+    topic: str
+    target_urls: list[str] = Field(default_factory=list)
+    target_sites: list[str] = Field(default_factory=list)
+    target_domains: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    must_include: list[str] = Field(default_factory=list)
+    must_exclude: list[str] = Field(default_factory=list)
+    focus_points: list[str] = Field(default_factory=list)
+    output_format: Literal["summary", "bullets", "table", "comparison"] = "summary"
+    include_project_sources: bool = False
+    source_id: Optional[str] = None
+    result_limit: int = Field(default=5, ge=1, le=10)
 
 
 class WorkflowSearchDocumentItem(BaseModel):
@@ -72,6 +92,65 @@ class WorkflowReportPayload(BaseModel):
     markdown: str
 
 
+class WorkflowWebSearchSourceItem(BaseModel):
+    # Web Search 來源可能來自外網或專案索引，因此欄位同時容納 URL 與 document metadata。
+    title: str
+    source_type: str
+    snippet: str
+    reason: str
+    matched_keywords: list[str] = Field(default_factory=list)
+    url: Optional[str] = None
+    domain: Optional[str] = None
+    source_name: Optional[str] = None
+    document_id: Optional[str] = None
+    relative_path: Optional[str] = None
+
+
+class WorkflowWebSearchUnderstandOutput(BaseModel):
+    # Understand 階段先把使用者意圖與搜尋條件正規化，後續 search/filter/format 才能穩定接棒。
+    goal_summary: str
+    normalized_topic: str
+    search_plan: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    target_urls: list[str] = Field(default_factory=list)
+    target_sites: list[str] = Field(default_factory=list)
+    target_domains: list[str] = Field(default_factory=list)
+    must_include: list[str] = Field(default_factory=list)
+    must_exclude: list[str] = Field(default_factory=list)
+    focus_points: list[str] = Field(default_factory=list)
+    output_format: str
+    include_project_sources: bool = False
+
+
+class WorkflowWebSearchSearchOutput(BaseModel):
+    # Search 階段只負責廣搜與蒐集候選來源，先不做太重的整理與格式化。
+    summary: str
+    search_queries: list[str] = Field(default_factory=list)
+    sources: list[WorkflowWebSearchSourceItem] = Field(default_factory=list)
+
+
+class WorkflowWebSearchFilterOutput(BaseModel):
+    # Filter 階段會把噪音來源排掉，留下真正要交給 format 階段的核心內容。
+    summary: str
+    kept_sources: list[WorkflowWebSearchSourceItem] = Field(default_factory=list)
+    discarded_count: int = 0
+    extracted_points: list[str] = Field(default_factory=list)
+    focus_answers: list[str] = Field(default_factory=list)
+
+
+class WorkflowWebSearchResult(BaseModel):
+    # 最終 Web Search 結果要同時適合頁面閱讀、後續接續 workflow、與歷史回看。
+    title: str
+    requested_format: str
+    summary: str
+    key_points: list[str] = Field(default_factory=list)
+    focus_answers: list[str] = Field(default_factory=list)
+    included_sources: list[WorkflowWebSearchSourceItem] = Field(default_factory=list)
+    applied_filters: list[str] = Field(default_factory=list)
+    structured_output: str
+    markdown: str
+
+
 class WorkflowStageRun(BaseModel):
     # 每個階段卡片都直接綁定這個模型，讓 agent / progress / input / output 一次到位。
     id: str
@@ -111,6 +190,7 @@ class WorkflowRunResponse(BaseModel):
     overall_progress_percent: int
     input_payload: dict[str, Any] = Field(default_factory=dict)
     final_report: Optional[WorkflowReportPayload] = None
+    final_web_result: Optional[WorkflowWebSearchResult] = None
     error_message: Optional[str] = None
     stages: list[WorkflowStageRun] = Field(default_factory=list)
     events: list[WorkflowEvent] = Field(default_factory=list)

@@ -4,8 +4,11 @@ import type { WorkflowRunResponse, WorkflowStageRun } from "@/lib/types";
 import { cn, formatDateTime } from "@/lib/utils";
 
 const STAGE_LABELS: Record<string, string> = {
+  understand: "理解",
   search: "搜索",
+  filter: "過濾",
   analysis: "分析",
+  format: "輸出",
   report: "報告"
 };
 
@@ -22,10 +25,12 @@ export function WorkflowStageBoard({ run }: WorkflowStageBoardProps) {
       <div className="grid gap-4 xl:grid-cols-3">
         {!run || stages.length === 0 ? (
           <div className="border-4 border-dashed border-slate-300 p-4 text-sm text-slate-500 xl:col-span-3">
-            尚未建立 workflow run。送出查詢後，這裡會依序顯示搜索、分析、報告三個階段。
+            尚未建立 workflow run。送出查詢後，這裡會依序顯示目前流程的每個階段與 agent 狀態。
           </div>
         ) : (
-          stages.map((stage, index) => <WorkflowStageCard key={stage.id} run={run} stage={stage} stepNumber={index + 1} />)
+          stages.map((stage, index) => (
+            <WorkflowStageCard key={stage.id} run={run} stage={stage} stepNumber={index + 1} totalSteps={stages.length} />
+          ))
         )}
       </div>
     </PixelCard>
@@ -36,9 +41,10 @@ interface WorkflowStageCardProps {
   run: WorkflowRunResponse;
   stage: WorkflowStageRun;
   stepNumber: number;
+  totalSteps: number;
 }
 
-function WorkflowStageCard({ run, stage, stepNumber }: WorkflowStageCardProps) {
+function WorkflowStageCard({ run, stage, stepNumber, totalSteps }: WorkflowStageCardProps) {
   // active agent 會用高亮框與背景區隔，讓使用者一眼知道目前處理到哪個 stage。
   const isActive = run.active_agent_id === stage.agent_id && run.current_stage === stage.stage_key && run.status === "running";
   const recentEvent = [...run.events].reverse().find((event) => event.stage_key === stage.stage_key);
@@ -54,7 +60,9 @@ function WorkflowStageCard({ run, stage, stepNumber }: WorkflowStageCardProps) {
     >
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-[11px] font-black tracking-[0.16em] text-slate-500">STEP {stepNumber}</p>
+          <p className="text-[11px] font-black tracking-[0.16em] text-slate-500">
+            STEP {stepNumber} / {totalSteps}
+          </p>
           <h3 className="mt-1 text-base font-black tracking-[0.08em]">{STAGE_LABELS[stage.stage_key] ?? stage.stage_key}</h3>
         </div>
         <StatusPill status={stage.status} />

@@ -4,7 +4,14 @@ from datetime import datetime
 from typing import Any
 
 from app.repositories.database import adapt_json, get_connection
-from app.schemas.workflow import WorkflowEvent, WorkflowReportPayload, WorkflowRunResponse, WorkflowStageRun
+from app.schemas.workflow import (
+    WORKFLOW_TYPE_WEB_SEARCH,
+    WorkflowEvent,
+    WorkflowReportPayload,
+    WorkflowRunResponse,
+    WorkflowStageRun,
+    WorkflowWebSearchResult,
+)
 from app.utils import json_loads, new_id, utc_now_iso
 
 
@@ -73,16 +80,28 @@ class WorkflowRepository:
 
         return self.get_run(run_id)
 
-    def list_runs(self, *, instance_id: str | None = None, limit: int = 20) -> list[WorkflowRunResponse]:
+    def list_runs(
+        self,
+        *,
+        instance_id: str | None = None,
+        workflow_type: str | None = None,
+        limit: int = 20,
+    ) -> list[WorkflowRunResponse]:
         # 列表頁只需要最近 runs，因此這裡一次抓主表後再逐筆拼細節。
         query = """
             SELECT id
             FROM workflow_runs
         """
         params: list[Any] = []
+        conditions: list[str] = []
         if instance_id:
-            query += " WHERE instance_id = ?"
+            conditions.append("instance_id = ?")
             params.append(instance_id)
+        if workflow_type:
+            conditions.append("workflow_type = ?")
+            params.append(workflow_type)
+        if conditions:
+            query += f" WHERE {' AND '.join(conditions)}"
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
 
@@ -99,11 +118,14 @@ class WorkflowRepository:
                 SELECT * FROM workflow_stage_runs
                 WHERE run_id = ?
                 ORDER BY CASE stage_key
-                    WHEN 'search' THEN 1
-                    WHEN 'analysis' THEN 2
-                    WHEN 'report' THEN 3
+                    WHEN 'understand' THEN 1
+                    WHEN 'search' THEN 2
+                    WHEN 'filter' THEN 3
+                    WHEN 'analysis' THEN 4
+                    WHEN 'format' THEN 5
+                    WHEN 'report' THEN 6
                     ELSE 99
-                END ASC
+                END ASC, created_at ASC
                 """,
                 (run_id,),
             ).fetchall()
@@ -115,7 +137,14 @@ class WorkflowRepository:
         if run_row is None:
             raise KeyError(f"找不到 workflow run：{run_id}")
 
-        final_report_payload = json_loads(run_row["final_report_json"], None)
+        final_payload = json_loads(run_row["final_report_json"], None)
+        final_report = None
+        final_web_result = None
+        if isinstance(final_payload, dict):
+            if run_row["workflow_type"] == WORKFLOW_TYPE_WEB_SEARCH:
+                final_web_result = WorkflowWebSearchResult(**final_payload)
+            else:
+                final_report = WorkflowReportPayload(**final_payload)
 
         return WorkflowRunResponse(
             id=run_row["id"],
@@ -126,7 +155,8 @@ class WorkflowRepository:
             active_agent_id=run_row["active_agent_id"],
             overall_progress_percent=run_row["overall_progress_percent"],
             input_payload=json_loads(run_row["input_payload"], {}),
-            final_report=WorkflowReportPayload(**final_report_payload) if final_report_payload else None,
+            final_report=final_report,
+            final_web_result=final_web_result,
             error_message=run_row["error_message"],
             stages=[self._to_stage(row) for row in stage_rows],
             events=[self._to_event(row) for row in event_rows],
@@ -142,7 +172,7 @@ class WorkflowRepository:
         current_stage: str | None,
         active_agent_id: str | None,
         overall_progress_percent: int,
-        final_report: dict[str, Any] | None = None,
+        final_payload: dict[str, Any] | None = None,
         error_message: str | None = None,
     ) -> None:
         with get_connection() as connection:
@@ -158,7 +188,7 @@ class WorkflowRepository:
                     current_stage,
                     active_agent_id,
                     overall_progress_percent,
-                    adapt_json(final_report) if final_report is not None else None,
+                    adapt_json(final_payload) if final_payload is not None else None,
                     error_message,
                     utc_now_iso(),
                     run_id,

@@ -218,6 +218,9 @@ export interface OpenClawWorkflowConfigResponse {
   updated_at: string;
 }
 
+export type WorkflowType = "search_report" | "web_search";
+export type WebSearchOutputFormat = "summary" | "bullets" | "table" | "comparison";
+
 export interface WorkflowSearchDocumentItem {
   document_id: string;
   filename: string;
@@ -253,6 +256,31 @@ export interface WorkflowReportPayload {
   markdown: string;
 }
 
+export interface WorkflowWebSearchSourceItem {
+  title: string;
+  source_type: string;
+  snippet: string;
+  reason: string;
+  matched_keywords: string[];
+  url?: string | null;
+  domain?: string | null;
+  source_name?: string | null;
+  document_id?: string | null;
+  relative_path?: string | null;
+}
+
+export interface WorkflowWebSearchResult {
+  title: string;
+  requested_format: WebSearchOutputFormat;
+  summary: string;
+  key_points: string[];
+  focus_answers: string[];
+  included_sources: WorkflowWebSearchSourceItem[];
+  applied_filters: string[];
+  structured_output: string;
+  markdown: string;
+}
+
 export interface WorkflowStageRun {
   id: string;
   stage_key: string;
@@ -282,16 +310,33 @@ export interface WorkflowEvent {
 export interface WorkflowRunResponse {
   id: string;
   instance_id: string;
-  workflow_type: string;
+  workflow_type: WorkflowType;
   status: string;
   current_stage?: string | null;
   active_agent_id?: string | null;
   overall_progress_percent: number;
   input_payload: Record<string, unknown>;
   final_report?: WorkflowReportPayload | null;
+  final_web_result?: WorkflowWebSearchResult | null;
   error_message?: string | null;
   stages: WorkflowStageRun[];
   events: WorkflowEvent[];
   created_at: string;
   updated_at: string;
+}
+
+export interface WorkflowWebSearchCreateRequest {
+  instance_id: string;
+  topic: string;
+  target_urls: string[];
+  target_sites: string[];
+  target_domains: string[];
+  keywords: string[];
+  must_include: string[];
+  must_exclude: string[];
+  focus_points: string[];
+  output_format: WebSearchOutputFormat;
+  include_project_sources: boolean;
+  source_id?: string;
+  result_limit: number;
 }

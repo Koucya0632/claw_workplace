@@ -53,7 +53,7 @@ npm --workspace web run test
 
 - 真接入：本地資料夾
 - 已預留：Google Drive / Notion connector 與 UI
-- 可用能力：一體化搜索-分析-報告工作流、全文搜索、流程可視化、結構化報告、Markdown 匯出
+- 可用能力：一體化搜索-分析-報告工作流、條件化 Web Search、全文搜索、流程可視化、結構化報告、Markdown 匯出
 
 ## MiniMax 設定
 
@@ -80,10 +80,13 @@ MINIMAX_MODEL=MiniMax-M2.5
 
 新版 `/search` 已整合成主流程工作台，會在同一頁中展示：
 
-- 搜索、分析、報告三個固定階段
+- `Project Workflow`：搜索、分析、報告三個固定階段
+- `Web Search`：理解、搜尋、過濾、輸出四個固定階段
 - 每個階段的負責 agent、狀態、進度、輸入與輸出
 - 目前正在處理中的 agent 與整體 workflow 進度
 - 完整事件時間線與最終結構化報告
+- Web Search 可自訂主題、網址 / 網站 / 網域、關鍵字、必須包含 / 排除條件、重點整理欄位與回傳格式
+- Web Search 完成後可一鍵把結果接續送入分析 / 報告流程
 
 在啟動流程前，請先到 `OpenClaw 管理 -> Workflow` 為目標 instance 配置：
 
@@ -91,7 +94,7 @@ MINIMAX_MODEL=MiniMax-M2.5
 - `analysis_agent_id`
 - `report_agent_id`
 
-配置完成後，`/search` 送出一次查詢就會自動串行跑完三個階段，並保留整條處理鏈路供回看。
+配置完成後，`/search` 送出一次查詢就會自動串行跑完對應階段，並保留整條處理鏈路供回看。
 
 ### 啟用前提
 

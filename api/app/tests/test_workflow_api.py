@@ -34,7 +34,100 @@ class MockWorkflowHookClient:
     def dispatch_agent(self, instance, token: str | None, payload: dict[str, Any]) -> dict[str, Any]:
         stage_key = payload["metadata"]["stage_key"]
 
-        if stage_key == "search":
+        if stage_key == "understand":
+            text = json.dumps(
+                {
+                    "goal_summary": "聚焦外部網站上和『包』相關的內容。",
+                    "normalized_topic": "搜尋『包』的外部說明與比較資訊",
+                    "search_plan": ["先查外部網站", "再整理重點"],
+                    "keywords": ["包", "方案"],
+                    "target_urls": [],
+                    "target_sites": ["官方網站"],
+                    "target_domains": ["example.com"],
+                    "must_include": ["價格"],
+                    "must_exclude": ["舊版"],
+                    "focus_points": ["差異", "重點"],
+                    "output_format": "bullets",
+                    "include_project_sources": True,
+                },
+                ensure_ascii=False,
+            )
+        elif stage_key == "search" and payload["metadata"].get("workflow_type") == "web_search":
+            text = json.dumps(
+                {
+                    "summary": "已找到外部網站與專案索引裡最相關的內容。",
+                    "search_queries": ["包 方案 價格", "site:example.com 包"],
+                    "sources": [
+                        {
+                            "title": "官方包方案",
+                            "source_type": "web",
+                            "snippet": "官方網站整理了各種包方案與價格",
+                            "reason": "直接命中主題與重點欄位",
+                            "matched_keywords": ["包", "價格"],
+                            "url": "https://example.com/package",
+                            "domain": "example.com",
+                        },
+                        {
+                            "title": "support-package.md",
+                            "source_type": "project",
+                            "snippet": "這是一份關於包的客服說明",
+                            "reason": "可以補強內部客服口徑",
+                            "matched_keywords": ["包"],
+                            "source_name": "Support Docs",
+                            "document_id": "doc_1",
+                            "relative_path": "support/support-package.md",
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        elif stage_key == "filter":
+            text = json.dumps(
+                {
+                    "summary": "已排除不相關內容，只保留與價格與差異最相關的來源。",
+                    "kept_sources": [
+                        {
+                            "title": "官方包方案",
+                            "source_type": "web",
+                            "snippet": "官方網站整理了各種包方案與價格",
+                            "reason": "最直接回答價格與差異",
+                            "matched_keywords": ["包", "價格"],
+                            "url": "https://example.com/package",
+                            "domain": "example.com",
+                        }
+                    ],
+                    "discarded_count": 1,
+                    "extracted_points": ["官方頁面提供最新方案差異。"],
+                    "focus_answers": ["價格與差異都集中在官方包方案頁。"],
+                },
+                ensure_ascii=False,
+            )
+        elif stage_key == "format":
+            text = json.dumps(
+                {
+                    "title": "『包』Web Search 整理",
+                    "requested_format": "bullets",
+                    "summary": "已完成外網與專案索引的條件化搜尋整理。",
+                    "key_points": ["官方頁面提供最新方案資訊。"],
+                    "focus_answers": ["若重點是價格與差異，官方頁最值得先看。"],
+                    "included_sources": [
+                        {
+                            "title": "官方包方案",
+                            "source_type": "web",
+                            "snippet": "官方網站整理了各種包方案與價格",
+                            "reason": "最直接回答價格與差異",
+                            "matched_keywords": ["包", "價格"],
+                            "url": "https://example.com/package",
+                            "domain": "example.com",
+                        }
+                    ],
+                    "applied_filters": ["必須包含：價格", "排除：舊版"],
+                    "structured_output": "- 官方頁最相關\n- 已過濾舊版內容",
+                    "markdown": "# 『包』Web Search 整理\n\n- 官方頁最相關\n- 已過濾舊版內容\n",
+                },
+                ensure_ascii=False,
+            )
+        elif stage_key == "search":
             text = json.dumps(
                 {
                     "summary": "已找到客服相關文件。",
@@ -221,3 +314,58 @@ def test_workflow_run_requires_config(client: TestClient) -> None:
     )
     assert response.status_code == 400
     assert "尚未設定搜索、分析、報告三階段 agent" in response.json()["detail"]
+
+
+def test_web_search_workflow_and_continue_to_report(client: TestClient) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+
+    config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+        },
+    )
+    assert config_response.status_code == 200
+
+    create_response = client.post(
+        "/api/v1/workflows/web-search",
+        json={
+            "instance_id": instance_id,
+            "topic": "包",
+            "target_urls": [],
+            "target_sites": ["官方網站"],
+            "target_domains": ["example.com"],
+            "keywords": ["包", "方案"],
+            "must_include": ["價格"],
+            "must_exclude": ["舊版"],
+            "focus_points": ["差異", "重點"],
+            "output_format": "bullets",
+            "include_project_sources": True,
+            "source_id": "src_1",
+            "result_limit": 5,
+        },
+    )
+    assert create_response.status_code == 201
+    payload = create_response.json()
+    assert payload["workflow_type"] == "web_search"
+    assert payload["status"] == "completed"
+    assert payload["final_web_result"]["title"] == "『包』Web Search 整理"
+    assert [stage["stage_key"] for stage in payload["stages"]] == ["understand", "search", "filter", "format"]
+    assert any(event["message"] == "正在理解搜尋目標..." for event in payload["events"])
+    assert any(event["message"] == "正在過濾無關資訊..." for event in payload["events"])
+
+    list_response = client.get("/api/v1/workflows", params={"instanceId": instance_id, "workflowType": "web_search"})
+    assert list_response.status_code == 200
+    assert len(list_response.json()) == 1
+
+    continue_response = client.post(f"/api/v1/workflows/{payload['id']}/continue-to-report")
+    assert continue_response.status_code == 201
+    follow_up = continue_response.json()
+    assert follow_up["workflow_type"] == "search_report"
+    assert follow_up["status"] == "completed"
+    assert follow_up["final_report"]["title"] == "『包』相關客服工作報告"
+    assert follow_up["input_payload"]["continued_from_run_id"] == payload["id"]

@@ -17,6 +17,8 @@ import type {
   SearchResponse,
   SourceResponse,
   TaskStatusResponse,
+  WorkflowType,
+  WorkflowWebSearchCreateRequest,
   WorkflowRunResponse
 } from "@/lib/types";
 
@@ -299,10 +301,13 @@ export async function fetchWorkflowRun(runId: string) {
   return request<WorkflowRunResponse>(`/workflows/${runId}`);
 }
 
-export async function fetchWorkflowRuns(params?: { instanceId?: string; limit?: number }) {
+export async function fetchWorkflowRuns(params?: { instanceId?: string; workflowType?: WorkflowType; limit?: number }) {
   const searchParams = new URLSearchParams();
   if (params?.instanceId) {
     searchParams.set("instanceId", params.instanceId);
+  }
+  if (params?.workflowType) {
+    searchParams.set("workflowType", params.workflowType);
   }
   if (params?.limit) {
     searchParams.set("limit", String(params.limit));
@@ -310,4 +315,17 @@ export async function fetchWorkflowRuns(params?: { instanceId?: string; limit?: 
 
   const suffix = searchParams.size > 0 ? `?${searchParams.toString()}` : "";
   return request<WorkflowRunResponse[]>(`/workflows${suffix}`);
+}
+
+export async function createWebSearchWorkflow(payload: WorkflowWebSearchCreateRequest) {
+  return request<WorkflowRunResponse>("/workflows/web-search", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function continueWorkflowToReport(runId: string) {
+  return request<WorkflowRunResponse>(`/workflows/${runId}/continue-to-report`, {
+    method: "POST"
+  });
 }

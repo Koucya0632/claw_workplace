@@ -28,12 +28,15 @@ export function WorkflowRunList({ runs, activeRunId, onSelect }: WorkflowRunList
             >
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <p className="text-sm font-black tracking-[0.08em]">{String(run.input_payload.query ?? "未命名查詢")}</p>
+                  <p className="text-sm font-black tracking-[0.08em]">
+                    {String(run.input_payload.query ?? run.input_payload.topic ?? "未命名查詢")}
+                  </p>
                   <p className="mt-1 text-xs text-slate-500">{run.id}</p>
                 </div>
                 <StatusPill status={run.status} />
               </div>
               <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] uppercase tracking-[0.12em] text-slate-500">
+                <span>{run.workflow_type === "web_search" ? "web search" : "search report"}</span>
                 <span>{run.current_stage ?? "waiting"}</span>
                 <span>{run.overall_progress_percent}%</span>
                 <span>{formatDateTime(run.updated_at)}</span>
