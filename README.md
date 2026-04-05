@@ -78,6 +78,35 @@ MINIMAX_MODEL=MiniMax-M2.5
 - 本專案自己的操作審計紀錄與快照摘要
 - 可選擇為特定 OpenClaw agent 開啟 `search_api`，透過 repo 內原生 plugin 將本專案搜索索引暴露為 native tool
 
+### 目前建議架構
+
+目前建議採用「1 個主控入口 + 3 個專職 agent + 3 類對外通道」：
+
+| 類型 | 角色 | 說明 |
+| --- | --- | --- |
+| 主控 agent | `main` | 主控秘書 / controller，負責接需求、路由、整合結果與最終回覆 |
+| 專職 agent | `support-agent` | 內部搜索、讀文件、整理證據，並作為 Discord support 專用頻道入口 |
+| 專職 agent | `daily-news-brief-agent` | Daily News workflow 專職，不作一般聊天入口 |
+| 專職 agent | `system-inspection-agent` | 巡檢 workflow 專職，不作一般聊天入口 |
+| 互動入口 | `AI Office` | 主聊天 bot 外殼，承接 Telegram / Discord 一般互動 |
+| 報告投遞 | `小新` | Daily News 專用投遞 bot |
+| 報告投遞 | `小巡` | System Inspection 專用投遞 bot |
+
+### 目前建議通道路由
+
+- Telegram 主入口 -> `main`
+- Discord `#一般` (`1490189668254486650`) -> `main`，需 mention
+- Discord support 專用頻道 (`1490333478942675076`) -> `support-agent`，不需 mention
+- Daily News 報告 -> `小新`
+- System Inspection 報告 -> `小巡`
+
+這個拓撲的原則是：
+
+- `main` 管入口與整合
+- `support-agent` 管搜尋與 Discord support 專用頻道
+- `daily-news-brief-agent` / `system-inspection-agent` 只跑各自 workflow
+- 報告投遞 bot 與互動式入口 bot 分離，避免聊天通道與報告通道互相影響
+
 ## 一體化搜索-分析-報告流程
 
 新版 `/search` 已整合成主流程工作台，會在同一頁中展示：
