@@ -51,6 +51,7 @@ class OpenClawHookClient:
         agent_id = str(payload.get("agent_id") or "").strip()
         session_key = str(payload.get("session_key") or "").strip()
         message = str(payload.get("message") or "").strip()
+        timeout_seconds = int(payload.get("timeout_seconds") or self.timeout_seconds)
 
         if not agent_id or not session_key or not message:
             raise OpenClawServiceError(
@@ -89,14 +90,14 @@ class OpenClawHookClient:
                 command,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout_seconds,
+                timeout=timeout_seconds,
                 check=False,
                 env={**os.environ, **env},
             )
         except subprocess.TimeoutExpired as error:
             raise OpenClawServiceError(
                 "OpenClaw agent 派發逾時。",
-                detail=f"command={' '.join(command)} timeout={self.timeout_seconds}s",
+                detail=f"command={' '.join(command)} timeout={timeout_seconds}s",
                 source_mode=self.source_mode,
             ) from error
         except OSError as error:

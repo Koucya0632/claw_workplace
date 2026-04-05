@@ -6,6 +6,8 @@ from app.routers import (
     documents,
     health,
     openclaw_agents,
+    openclaw_daily_news,
+    openclaw_system_inspection,
     openclaw_agent_tools,
     openclaw_config,
     openclaw_workflow_config,
@@ -20,6 +22,7 @@ from app.routers import (
     tasks,
     workflows,
 )
+from app.services.workflow_service import DailyNewsScheduler, SystemInspectionScheduler
 
 
 def create_app() -> FastAPI:
@@ -50,10 +53,27 @@ def create_app() -> FastAPI:
     app.include_router(openclaw_devices.router, prefix="/api/v1")
     app.include_router(openclaw_config.router, prefix="/api/v1")
     app.include_router(openclaw_workflow_config.router, prefix="/api/v1")
+    app.include_router(openclaw_daily_news.router, prefix="/api/v1")
+    app.include_router(openclaw_system_inspection.router, prefix="/api/v1")
     app.include_router(openclaw_logs.router, prefix="/api/v1")
     app.include_router(openclaw_hooks.router, prefix="/api/v1")
     app.include_router(openclaw_operations.router, prefix="/api/v1")
     app.include_router(workflows.router, prefix="/api/v1")
+
+    scheduler = DailyNewsScheduler()
+    system_inspection_scheduler = SystemInspectionScheduler()
+    app.state.daily_news_scheduler = scheduler
+    app.state.system_inspection_scheduler = system_inspection_scheduler
+
+    @app.on_event("startup")
+    def start_daily_news_scheduler() -> None:
+        scheduler.start()
+        system_inspection_scheduler.start()
+
+    @app.on_event("shutdown")
+    def stop_daily_news_scheduler() -> None:
+        scheduler.stop()
+        system_inspection_scheduler.stop()
 
     return app
 

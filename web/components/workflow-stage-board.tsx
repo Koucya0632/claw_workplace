@@ -5,10 +5,18 @@ import { cn, formatDateTime } from "@/lib/utils";
 
 const STAGE_LABELS: Record<string, string> = {
   understand: "理解",
+  monitor: "監控",
+  snapshot: "快照",
+  version_check: "版本",
+  log_review: "日誌",
+  risk_assessment: "風險",
   search: "搜索",
+  dedupe: "去重",
   filter: "過濾",
+  rank: "排序",
   analysis: "分析",
   format: "輸出",
+  brief: "簡報",
   report: "報告"
 };
 

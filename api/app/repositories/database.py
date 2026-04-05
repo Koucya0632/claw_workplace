@@ -163,9 +163,67 @@ SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS openclaw_workflow_configs (
         instance_id TEXT PRIMARY KEY,
+        controller_agent_id TEXT,
         search_agent_id TEXT NOT NULL,
         analysis_agent_id TEXT NOT NULL,
         report_agent_id TEXT NOT NULL,
+        specialist_agents_json TEXT NOT NULL DEFAULT '{}',
+        routing_rules_json TEXT NOT NULL DEFAULT '[]',
+        handoff_policy_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(instance_id) REFERENCES openclaw_instances(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS openclaw_daily_news_configs (
+        instance_id TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        brief_name TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        keywords_json TEXT NOT NULL DEFAULT '[]',
+        industries_json TEXT NOT NULL DEFAULT '[]',
+        regions_json TEXT NOT NULL DEFAULT '[]',
+        people_json TEXT NOT NULL DEFAULT '[]',
+        companies_json TEXT NOT NULL DEFAULT '[]',
+        source_domains_json TEXT NOT NULL DEFAULT '[]',
+        source_urls_json TEXT NOT NULL DEFAULT '[]',
+        must_include_json TEXT NOT NULL DEFAULT '[]',
+        must_exclude_json TEXT NOT NULL DEFAULT '[]',
+        focus_points_json TEXT NOT NULL DEFAULT '[]',
+        output_format TEXT NOT NULL DEFAULT 'summary',
+        delivery_channel TEXT NOT NULL DEFAULT 'telegram',
+        telegram_target TEXT NOT NULL DEFAULT '',
+        discord_channel_id TEXT NOT NULL DEFAULT '',
+        schedule_timezone TEXT NOT NULL DEFAULT 'Asia/Tokyo',
+        schedule_time TEXT NOT NULL DEFAULT '09:00',
+        last_scheduled_date TEXT,
+        last_run_id TEXT,
+        last_delivery_status TEXT,
+        last_delivery_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(instance_id) REFERENCES openclaw_instances(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS openclaw_system_inspection_configs (
+        instance_id TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        schedule_timezone TEXT NOT NULL DEFAULT 'Asia/Tokyo',
+        schedule_time TEXT NOT NULL DEFAULT '09:30',
+        delivery_channel TEXT NOT NULL DEFAULT 'telegram',
+        telegram_target TEXT NOT NULL DEFAULT '',
+        discord_channel_id TEXT NOT NULL DEFAULT '',
+        version_check_enabled INTEGER NOT NULL DEFAULT 1,
+        log_review_enabled INTEGER NOT NULL DEFAULT 1,
+        log_review_window_hours INTEGER NOT NULL DEFAULT 24,
+        log_review_limit INTEGER NOT NULL DEFAULT 500,
+        official_release_url TEXT NOT NULL DEFAULT 'https://docs.openclaw.ai/cli/agents',
+        last_scheduled_date TEXT,
+        last_run_id TEXT,
+        last_delivery_status TEXT,
+        last_delivery_error TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY(instance_id) REFERENCES openclaw_instances(id) ON DELETE CASCADE
@@ -236,6 +294,9 @@ def ensure_database_ready() -> None:
     with sqlite3.connect(database_file) as connection:
         for statement in SCHEMA_STATEMENTS:
             connection.execute(statement)
+        _ensure_openclaw_workflow_config_columns(connection)
+        _ensure_openclaw_daily_news_columns(connection)
+        _ensure_openclaw_system_inspection_columns(connection)
         connection.commit()
 
 
@@ -250,3 +311,45 @@ def get_connection() -> Iterator[sqlite3.Connection]:
         connection.commit()
     finally:
         connection.close()
+
+
+def _ensure_openclaw_workflow_config_columns(connection: sqlite3.Connection) -> None:
+    # SQLite 不會自動替既有資料表補欄位，因此這裡要顯式做 schema 漸進升級。
+    rows = connection.execute("PRAGMA table_info(openclaw_workflow_configs)").fetchall()
+    if not rows:
+        return
+
+    existing_columns = {row[1] for row in rows}
+    if "controller_agent_id" not in existing_columns:
+        connection.execute("ALTER TABLE openclaw_workflow_configs ADD COLUMN controller_agent_id TEXT")
+        connection.execute("UPDATE openclaw_workflow_configs SET controller_agent_id = search_agent_id WHERE controller_agent_id IS NULL")
+    if "specialist_agents_json" not in existing_columns:
+        connection.execute("ALTER TABLE openclaw_workflow_configs ADD COLUMN specialist_agents_json TEXT NOT NULL DEFAULT '{}'")
+    if "routing_rules_json" not in existing_columns:
+        connection.execute("ALTER TABLE openclaw_workflow_configs ADD COLUMN routing_rules_json TEXT NOT NULL DEFAULT '[]'")
+    if "handoff_policy_json" not in existing_columns:
+        connection.execute("ALTER TABLE openclaw_workflow_configs ADD COLUMN handoff_policy_json TEXT NOT NULL DEFAULT '{}'")
+
+
+def _ensure_openclaw_daily_news_columns(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("PRAGMA table_info(openclaw_daily_news_configs)").fetchall()
+    if not rows:
+        return
+
+    existing_columns = {row[1] for row in rows}
+    if "delivery_channel" not in existing_columns:
+        connection.execute("ALTER TABLE openclaw_daily_news_configs ADD COLUMN delivery_channel TEXT NOT NULL DEFAULT 'telegram'")
+    if "discord_channel_id" not in existing_columns:
+        connection.execute("ALTER TABLE openclaw_daily_news_configs ADD COLUMN discord_channel_id TEXT NOT NULL DEFAULT ''")
+
+
+def _ensure_openclaw_system_inspection_columns(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("PRAGMA table_info(openclaw_system_inspection_configs)").fetchall()
+    if not rows:
+        return
+
+    existing_columns = {row[1] for row in rows}
+    if "delivery_channel" not in existing_columns:
+        connection.execute("ALTER TABLE openclaw_system_inspection_configs ADD COLUMN delivery_channel TEXT NOT NULL DEFAULT 'telegram'")
+    if "discord_channel_id" not in existing_columns:
+        connection.execute("ALTER TABLE openclaw_system_inspection_configs ADD COLUMN discord_channel_id TEXT NOT NULL DEFAULT ''")

@@ -3,33 +3,45 @@ from __future__ import annotations
 import time
 from typing import Any, Optional, Tuple
 
+# 取得設定檔
 from app.config import get_settings
+# OpenClaw Agent 能力相關的 repository
 from app.repositories.openclaw_agent_capability_repository import OpenClawAgentCapabilityRepository
+# OpenClaw Instance 相關的資料存取
 from app.repositories.openclaw_instance_repository import OpenClawInstanceRepository
+# 操作日誌相關的 repository
 from app.repositories.openclaw_operation_log_repository import OpenClawOperationLogRepository
+# Agent 的 schema 定義
 from app.schemas.openclaw_agent import OpenClawAgentCreateRequest, OpenClawAgentSummary
+# 設定檔相關的 schema 定義
 from app.schemas.openclaw_config import (
     OpenClawConfigResponse,
     OpenClawConfigSetRequest,
     OpenClawConfigValidateRequest,
     OpenClawConfigValidationResponse,
 )
+# 設備摘要資料的 schema
 from app.schemas.openclaw_device import OpenClawDeviceSummary
+# Instance 的 schema 定義
 from app.schemas.openclaw_instance import (
     OpenClawHealthResponse,
     OpenClawInstanceCreateRequest,
     OpenClawInstanceResponse,
     OpenClawInstanceUpdateRequest,
 )
+# LogEntry 的 schema
 from app.schemas.openclaw_log import OpenClawLogEntry
+# CLI 適配器，用於與 OpenClaw 互動
 from app.services.openclaw_cli_adapter import OpenClawCliAdapter
+# 服務端可能會遇到的錯誤型別
 from app.services.openclaw_errors import OpenClawServiceError
+# 機敏資訊加解密的工具
 from app.services.openclaw_secret_cipher import OpenClawSecretCipher
+# 工具函式，用於截斷文字
 from app.utils import truncate_text
 
-
 class OpenClawInstanceService:
-    # instance service 負責 OpenClaw 實例本身的生命週期與健康檢查。
+    # 負責管理 OpenClaw 實例的生命週期及健康狀態
     def __init__(
         self,
         repository: Optional[OpenClawInstanceRepository] = None,
@@ -37,22 +49,28 @@ class OpenClawInstanceService:
         cli_adapter: Optional[OpenClawCliAdapter] = None,
         secret_cipher: Optional[OpenClawSecretCipher] = None,
     ) -> None:
+        # 初始化設定
         settings = get_settings()
+        # 初始化各 repository 及工具
         self.repository = repository or OpenClawInstanceRepository()
         self.operation_log_repository = operation_log_repository or OpenClawOperationLogRepository()
         self.cli_adapter = cli_adapter or OpenClawCliAdapter()
         self.secret_cipher = secret_cipher or OpenClawSecretCipher(settings.openclaw_secret_key)
 
     def list_instances(self) -> list[OpenClawInstanceResponse]:
+        # 列出所有 OpenClaw instances
         return self.repository.list_all()
 
     def create_instance(self, payload: OpenClawInstanceCreateRequest) -> OpenClawInstanceResponse:
+        # 創建新 instance
         instance = self.repository.create(payload)
 
+        # 儲存 token（如有）
         if payload.token:
             self._save_token(instance.id, payload.token)
             instance = self.repository.get(instance.id)
 
+        # 建立操作日誌
         self.operation_log_repository.create(
             instance_id=instance.id,
             operation_type="create_instance",
@@ -67,6 +85,7 @@ class OpenClawInstanceService:
         return instance
 
     def update_instance(self, instance_id: str, payload: OpenClawInstanceUpdateRequest) -> OpenClawInstanceResponse:
+        # 更新 instance 內容
         if payload.clear_token:
             self.repository.clear_secret(instance_id)
 
@@ -74,6 +93,7 @@ class OpenClawInstanceService:
             self._save_token(instance_id, payload.token)
 
         instance = self.repository.update(instance_id, payload)
+        # 記錄操作日誌
         self.operation_log_repository.create(
             instance_id=instance.id,
             operation_type="update_instance",
@@ -94,17 +114,22 @@ class OpenClawInstanceService:
         return instance
 
     def check_health(self, instance_id: str) -> tuple[OpenClawHealthResponse, int]:
+        # 健康檢查：呼叫 OpenClaw instance 的 health API
         instance = self.repository.get(instance_id)
         token = self._resolve_token(instance_id)
         started_at = time.perf_counter()
 
         try:
+            # 向底層 CLI Adapter 發出健康檢查請求
             payload = self.cli_adapter.get_health(instance, token)
             status = str(payload.get("status") or "healthy")
+            # 更新 instance 健康狀態
             updated_instance = self.repository.update_health_status(instance_id, status)
             checked_at = updated_instance.last_health_checked_at or updated_instance.updated_at
             response = OpenClawHealthResponse(status=status, checked_at=checked_at, details=payload)
+            # Snapshot 快照記錄
             self.repository.upsert_snapshot(instance_id, "health", response.model_dump(mode="json"))
+            # 記錄成功操作日誌
             self.operation_log_repository.create(
                 instance_id=instance_id,
                 operation_type="health_check",
@@ -118,6 +143,7 @@ class OpenClawInstanceService:
             )
             return response, _elapsed_ms(started_at)
         except OpenClawServiceError as error:
+            # 異常時更新健康狀態為失敗，並記錄操作日誌
             self.repository.update_health_status(instance_id, "failed")
             self.operation_log_repository.create(
                 instance_id=instance_id,
@@ -133,12 +159,14 @@ class OpenClawInstanceService:
             raise
 
     def _save_token(self, instance_id: str, token: str) -> None:
+        # 儲存密鑰至加密存儲（若未設定密鑰則拒絕）
         if not self.secret_cipher.is_enabled:
             raise ValueError("尚未設定 OPENCLAW_SECRET_KEY，無法保存 Gateway token。")
 
         self.repository.save_secret(instance_id, self.secret_cipher.encrypt(token))
 
     def _resolve_token(self, instance_id: str) -> Optional[str]:
+        # 解密 token，如無密鑰則回傳 None
         encrypted_token = self.repository.get_secret(instance_id)
         if encrypted_token is None:
             return None
@@ -146,7 +174,7 @@ class OpenClawInstanceService:
 
 
 class OpenClawManagementService:
-    # management service 專注於 agents、devices、config、logs 等管理操作。
+    # 管理介面服務：主要操作 agents、devices、config、log 等管理性事項
     def __init__(
         self,
         repository: Optional[OpenClawInstanceRepository] = None,
@@ -155,6 +183,7 @@ class OpenClawManagementService:
         cli_adapter: Optional[OpenClawCliAdapter] = None,
         secret_cipher: Optional[OpenClawSecretCipher] = None,
     ) -> None:
+        # 取得設定及初始化所有必要 repository 和工具
         settings = get_settings()
         self.repository = repository or OpenClawInstanceRepository()
         self.capability_repository = capability_repository or OpenClawAgentCapabilityRepository()
@@ -163,14 +192,18 @@ class OpenClawManagementService:
         self.secret_cipher = secret_cipher or OpenClawSecretCipher(settings.openclaw_secret_key)
 
     def list_agents(self, instance_id: str) -> tuple[list[OpenClawAgentSummary], int]:
+        # 取得 agent 列表，並自動組合相關能力摘要
         started_at = time.perf_counter()
         instance, token = self._load_context(instance_id)
         try:
+            # 組能力摘要表
             capability_map = _build_capability_summary_map(self.capability_repository.list_for_instance(instance_id=instance_id))
+            # 從 CLI 取出所有 agent，組合 agent summary
             agents = [
                 self._to_agent_summary(item, capability_summary=capability_map.get(str(item.get("id") or item.get("agent_id") or ""), {}))
                 for item in self.cli_adapter.list_agents(instance, token)
             ]
+            # 更新 snapshot 並記錄日誌
             self.repository.upsert_snapshot(instance_id, "agents", {"items": [agent.model_dump() for agent in agents]})
             self._log_success(
                 instance_id=instance_id,
@@ -182,6 +215,7 @@ class OpenClawManagementService:
             )
             return agents, _elapsed_ms(started_at)
         except OpenClawServiceError as error:
+            # 記錄失敗操作
             self._log_failure(
                 instance_id=instance_id,
                 operation_type="list_agents",
@@ -193,6 +227,7 @@ class OpenClawManagementService:
             raise
 
     def create_agent(self, payload: OpenClawAgentCreateRequest) -> tuple[OpenClawAgentSummary, int]:
+        # 創建 agent，回傳摘要及耗時
         started_at = time.perf_counter()
         instance, token = self._load_context(payload.instance_id)
         try:
@@ -219,10 +254,12 @@ class OpenClawManagementService:
             raise
 
     def list_devices(self, instance_id: str) -> tuple[list[OpenClawDeviceSummary], int]:
+        # 列舉所有設備摘要
         started_at = time.perf_counter()
         instance, token = self._load_context(instance_id)
         try:
             devices = [self._to_device_summary(item) for item in self.cli_adapter.list_devices(instance, token)]
+            # 更新設備快照
             self.repository.upsert_snapshot(
                 instance_id,
                 "devices",
@@ -249,20 +286,25 @@ class OpenClawManagementService:
             raise
 
     def approve_device(self, instance_id: str, device_id: str) -> tuple[dict[str, Any], int]:
+        # 同意設備加入
         return self._run_device_action(instance_id, device_id, "approve")
 
     def reject_device(self, instance_id: str, device_id: str) -> tuple[dict[str, Any], int]:
+        # 拒絕設備加入
         return self._run_device_action(instance_id, device_id, "reject")
 
     def revoke_device(self, instance_id: str, device_id: str) -> tuple[dict[str, Any], int]:
+        # 撤銷設備權限
         return self._run_device_action(instance_id, device_id, "revoke")
 
     def get_config(self, instance_id: str, path: str) -> tuple[OpenClawConfigResponse, int]:
+        # 查詢組態設定
         started_at = time.perf_counter()
         instance, token = self._load_context(instance_id)
         try:
             payload = self.cli_adapter.get_config(instance, token, path)
             response = OpenClawConfigResponse(path=path, value=payload.get("value", payload))
+            # 快照目前 config 狀態
             self.repository.upsert_snapshot(
                 instance_id,
                 "config_summary",
@@ -289,11 +331,13 @@ class OpenClawManagementService:
             raise
 
     def set_config(self, payload: OpenClawConfigSetRequest) -> tuple[OpenClawConfigResponse, int]:
+        # 設定組態
         started_at = time.perf_counter()
         instance, token = self._load_context(payload.instance_id)
         try:
             result = self.cli_adapter.set_config(instance, token, payload.path, payload.value)
             response = OpenClawConfigResponse(path=payload.path, value=result.get("value", payload.value))
+            # 紀錄最新 config 設定快照
             self.repository.upsert_snapshot(
                 payload.instance_id,
                 "config_summary",
@@ -320,6 +364,7 @@ class OpenClawManagementService:
             raise
 
     def validate_config(self, payload: OpenClawConfigValidateRequest) -> tuple[OpenClawConfigValidationResponse, int]:
+        # 驗證組態正確性
         started_at = time.perf_counter()
         instance, token = self._load_context(payload.instance_id)
         try:
@@ -349,6 +394,7 @@ class OpenClawManagementService:
             raise
 
     def get_logs(self, instance_id: str, limit: int) -> tuple[list[OpenClawLogEntry], int]:
+        # 取得 OpenClaw instance log 清單
         started_at = time.perf_counter()
         instance, token = self._load_context(instance_id)
         try:
@@ -374,6 +420,7 @@ class OpenClawManagementService:
             raise
 
     def _run_device_action(self, instance_id: str, device_id: str, action: str) -> tuple[dict[str, Any], int]:
+        # 呼叫適配器動作，進行設備管理（approve/reject/revoke）
         started_at = time.perf_counter()
         instance, token = self._load_context(instance_id)
         adapter_method = getattr(self.cli_adapter, f"{action}_device")
@@ -400,6 +447,7 @@ class OpenClawManagementService:
             raise
 
     def _load_context(self, instance_id: str) -> Tuple[OpenClawInstanceResponse, Optional[str]]:
+        # 載入 instance 狀態以及解密 token
         instance = self.repository.get(instance_id)
         encrypted_token = self.repository.get_secret(instance_id)
         token = self.secret_cipher.decrypt(encrypted_token) if encrypted_token else None
@@ -415,6 +463,7 @@ class OpenClawManagementService:
         request_summary: dict[str, Any],
         response_summary: dict[str, Any],
     ) -> None:
+        # 記錄成功的操作日誌
         self.operation_log_repository.create(
             instance_id=instance_id,
             operation_type=operation_type,
@@ -437,6 +486,7 @@ class OpenClawManagementService:
         request_summary: dict[str, Any],
         error: OpenClawServiceError,
     ) -> None:
+        # 記錄失敗的操作日誌
         self.operation_log_repository.create(
             instance_id=instance_id,
             operation_type=operation_type,
@@ -455,8 +505,10 @@ class OpenClawManagementService:
         *,
         capability_summary: Optional[dict[str, dict[str, Any]]] = None,
     ) -> OpenClawAgentSummary:
+        # 將 API 回應內容轉換為 agent 摘要
         bindings = payload.get("bindings")
         channel_count = len(bindings) if isinstance(bindings, list) else int(payload.get("channel_count", 0))
+        # 擷取 metadata
         metadata = {
             key: value
             for key, value in payload.items()
@@ -472,6 +524,7 @@ class OpenClawManagementService:
         )
 
     def _to_device_summary(self, payload: dict[str, Any]) -> OpenClawDeviceSummary:
+        # 將設備 API 回傳轉成 device summary
         device_name = payload.get("name") or payload.get("label") or payload.get("clientId") or payload.get("deviceId")
         return OpenClawDeviceSummary(
             id=str(payload.get("id") or payload.get("device_id") or payload.get("deviceId") or ""),
@@ -487,6 +540,7 @@ class OpenClawManagementService:
         )
 
     def _to_log_entry(self, payload: dict[str, Any]) -> OpenClawLogEntry:
+        # 將原始 log dict 轉為 LogEntry schema
         return OpenClawLogEntry(
             timestamp=payload.get("timestamp"),
             level=payload.get("level"),
@@ -496,10 +550,12 @@ class OpenClawManagementService:
 
 
 def _elapsed_ms(started_at: float) -> int:
+    # 回傳自 started_at 到現在的經過毫秒數
     return int((time.perf_counter() - started_at) * 1000)
 
 
 def _coerce_messages(payload: dict[str, Any]) -> list[str]:
+    # 將 messages 欄位統一為 List[str]
     messages = payload.get("messages")
     if isinstance(messages, list):
         return [str(message) for message in messages]
@@ -509,6 +565,7 @@ def _coerce_messages(payload: dict[str, Any]) -> list[str]:
 
 
 def _build_capability_summary_map(records: list[Any]) -> dict[str, dict[str, dict[str, Any]]]:
+    # 將 agent capability 列表整理成可供查詢的 map
     summary: dict[str, dict[str, dict[str, Any]]] = {}
     for record in records:
         config = record.config if isinstance(record.config, dict) else {}

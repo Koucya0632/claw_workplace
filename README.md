@@ -71,7 +71,9 @@ MINIMAX_MODEL=MiniMax-M2.5
 
 - OpenClaw Instance 建立、編輯、健康檢查
 - Agents / Devices / Config / Logs 管理 API 與前端頁面
-- Workflow agent mapping 管理頁，可為每個 instance 指定搜索 / 分析 / 報告三個 stage 的 agent
+- Workflow agent mapping 管理頁，可為每個 instance 指定主控秘書 agent、核心搜索 / 分析 / 報告 agent，以及多個專職 agent
+- Daily News Brief 管理頁，可設定新聞主題、關鍵字、來源條件、Telegram 目標與每日排程
+- System Inspection 管理頁，可設定版本更新巡檢、日誌風險評估與 Telegram 摘要推送
 - `/hooks/agent`、`/hooks/wake` 手動派發入口
 - 本專案自己的操作審計紀錄與快照摘要
 - 可選擇為特定 OpenClaw agent 開啟 `search_api`，透過 repo 內原生 plugin 將本專案搜索索引暴露為 native tool
@@ -82,6 +84,8 @@ MINIMAX_MODEL=MiniMax-M2.5
 
 - `Project Workflow`：搜索、分析、報告三個固定階段
 - `Web Search`：理解、搜尋、過濾、輸出四個固定階段
+- `Daily News Brief`：可在 OpenClaw 管理區設定每日新聞監控、去重、排序、摘要與 Telegram 投遞
+- `System Inspection`：可在 OpenClaw 管理區設定版本巡檢、日誌問題聚合、風險排序與升級建議
 - 每個階段的負責 agent、狀態、進度、輸入與輸出
 - 目前正在處理中的 agent 與整體 workflow 進度
 - 完整事件時間線與最終結構化報告
@@ -90,9 +94,13 @@ MINIMAX_MODEL=MiniMax-M2.5
 
 在啟動流程前，請先到 `OpenClaw 管理 -> Workflow` 為目標 instance 配置：
 
+- `controller_agent_id`
 - `search_agent_id`
 - `analysis_agent_id`
 - `report_agent_id`
+- `specialist_agents`
+- `routing_rules`
+- `handoff_policy`
 
 配置完成後，`/search` 送出一次查詢就會自動串行跑完對應階段，並保留整條處理鏈路供回看。
 
@@ -112,6 +120,14 @@ OPENCLAW_SECRET_KEY=請填入一組固定密鑰
 OPENCLAW_AGENT_TOOL_API_BASE_URL=http://127.0.0.1:8000/api/v1
 OPENCLAW_AGENT_SEARCH_DEFAULT_LIMIT=5
 OPENCLAW_AGENT_DOCUMENT_MAX_CHARS=8000
+OPENCLAW_DAILY_NEWS_TELEGRAM_BOT_TOKEN=每日新聞專用 Telegram bot token
+OPENCLAW_DAILY_NEWS_TELEGRAM_TIMEOUT_SECONDS=20
+OPENCLAW_DAILY_NEWS_DISCORD_BOT_TOKEN=每日新聞專用 Discord bot token
+OPENCLAW_DAILY_NEWS_DISCORD_TIMEOUT_SECONDS=20
+OPENCLAW_SYSTEM_INSPECTION_TELEGRAM_BOT_TOKEN=系統巡檢專用 Telegram bot token
+OPENCLAW_SYSTEM_INSPECTION_TELEGRAM_TIMEOUT_SECONDS=20
+OPENCLAW_SYSTEM_INSPECTION_DISCORD_BOT_TOKEN=系統巡檢專用 Discord bot token
+OPENCLAW_SYSTEM_INSPECTION_DISCORD_TIMEOUT_SECONDS=20
 ```
 
 若未設定 `OPENCLAW_SECRET_KEY`，仍可建立 Instance，但帶 token 的建立或更新操作會被拒絕。
@@ -136,3 +152,63 @@ OPENCLAW_AGENT_DOCUMENT_MAX_CHARS=8000
 - `SEARCH_API.md`
 
 已進入 deprecated 狀態，不再是預設執行路徑。
+
+### Daily News Brief Agent
+
+在 `OpenClaw 管理 -> Daily News` 頁面中，可以為單一 instance 設定一份 Daily News Brief：
+
+- 新聞主題
+- 關鍵字 / 產業 / 地區 / 人物 / 公司
+- 指定來源網域 / URL
+- 必須包含 / 排除條件
+- 需要重點整理的資訊
+- Telegram 或 Discord 推送目標
+
+系統會每天 `09:00 JST` 自動建立 `news_brief` workflow run，並依序執行：
+
+- `monitor`
+- `search`
+- `dedupe`
+- `rank`
+- `brief`
+
+完成後會保留完整鏈路、最終 Markdown，以及 Telegram / Discord 投遞狀態；也可在管理頁手動重跑一次當日簡報。
+
+Daily News 的報告推送可切換 Telegram 或 Discord；Telegram 走 `OPENCLAW_DAILY_NEWS_TELEGRAM_BOT_TOKEN`，Discord 走 `OPENCLAW_DAILY_NEWS_DISCORD_BOT_TOKEN`，因此可以和 `.openclaw/openclaw.json` 裡主聊天 bot 分離，不會影響 `main` agent 的聊天 channel。
+
+### System Inspection & Risk Assessment Agent
+
+在 `OpenClaw 管理 -> System Inspection` 頁面中，可以為單一 instance 設定一份應用層巡檢：
+
+- 每日巡檢排程（預設 `09:30 JST`）
+- 版本檢查開關
+- 日誌巡檢開關
+- 日誌視窗與巡檢數量上限
+
+System Inspection 的報告推送也可切換 Telegram 或 Discord；Telegram 走 `OPENCLAW_SYSTEM_INSPECTION_TELEGRAM_BOT_TOKEN`，Discord 走 `OPENCLAW_SYSTEM_INSPECTION_DISCORD_BOT_TOKEN`。
+- 官方版本來源 URL
+- Telegram 摘要推送目標
+
+系統會建立 `system_inspection` workflow run，固定執行：
+
+- `snapshot`
+- `version_check`
+- `log_review`
+- `risk_assessment`
+- `report`
+
+完成後會產出：
+
+- 巡檢總結
+- 版本更新檢查
+- 系統日誌問題清單
+- 高優先級風險
+- 修復與優化建議
+- 待確認事項
+- 建議執行順序
+
+並可選擇將摘要推送到 Telegram，幫助快速判斷：
+
+- 是否建議升級
+- 先修什麼
+- 哪些結論仍需驗證

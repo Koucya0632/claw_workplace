@@ -24,6 +24,9 @@ class OpenClawCliAdapter:
     def get_health(self, instance: OpenClawInstanceResponse, token: Optional[str]) -> dict[str, Any]:
         return self._run_json_command(instance, token, ["gateway", "health", "--json"])
 
+    def get_version(self) -> str:
+        return self._run_global_text_command(["--version"])
+
     def list_agents(self, instance: OpenClawInstanceResponse, token: Optional[str]) -> list[dict[str, Any]]:
         payload = self._run_json_command(instance, token, ["agents", "list", "--json"])
         return _coerce_items(payload)

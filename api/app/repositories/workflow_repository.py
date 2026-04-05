@@ -5,11 +5,15 @@ from typing import Any
 
 from app.repositories.database import adapt_json, get_connection
 from app.schemas.workflow import (
+    WORKFLOW_TYPE_NEWS_BRIEF,
+    WORKFLOW_TYPE_SYSTEM_INSPECTION,
     WORKFLOW_TYPE_WEB_SEARCH,
     WorkflowEvent,
+    WorkflowNewsBriefPayload,
     WorkflowReportPayload,
     WorkflowRunResponse,
     WorkflowStageRun,
+    WorkflowSystemInspectionReportPayload,
     WorkflowWebSearchResult,
 )
 from app.utils import json_loads, new_id, utc_now_iso
@@ -119,11 +123,19 @@ class WorkflowRepository:
                 WHERE run_id = ?
                 ORDER BY CASE stage_key
                     WHEN 'understand' THEN 1
-                    WHEN 'search' THEN 2
-                    WHEN 'filter' THEN 3
-                    WHEN 'analysis' THEN 4
-                    WHEN 'format' THEN 5
-                    WHEN 'report' THEN 6
+                    WHEN 'monitor' THEN 2
+                    WHEN 'search' THEN 3
+                    WHEN 'snapshot' THEN 4
+                    WHEN 'version_check' THEN 5
+                    WHEN 'log_review' THEN 6
+                    WHEN 'risk_assessment' THEN 7
+                    WHEN 'dedupe' THEN 8
+                    WHEN 'filter' THEN 9
+                    WHEN 'rank' THEN 10
+                    WHEN 'analysis' THEN 11
+                    WHEN 'format' THEN 12
+                    WHEN 'brief' THEN 13
+                    WHEN 'report' THEN 14
                     ELSE 99
                 END ASC, created_at ASC
                 """,
@@ -140,9 +152,15 @@ class WorkflowRepository:
         final_payload = json_loads(run_row["final_report_json"], None)
         final_report = None
         final_web_result = None
+        final_news_brief = None
+        final_system_inspection = None
         if isinstance(final_payload, dict):
             if run_row["workflow_type"] == WORKFLOW_TYPE_WEB_SEARCH:
                 final_web_result = WorkflowWebSearchResult(**final_payload)
+            elif run_row["workflow_type"] == WORKFLOW_TYPE_NEWS_BRIEF:
+                final_news_brief = WorkflowNewsBriefPayload(**final_payload)
+            elif run_row["workflow_type"] == WORKFLOW_TYPE_SYSTEM_INSPECTION:
+                final_system_inspection = WorkflowSystemInspectionReportPayload(**final_payload)
             else:
                 final_report = WorkflowReportPayload(**final_payload)
 
@@ -157,6 +175,8 @@ class WorkflowRepository:
             input_payload=json_loads(run_row["input_payload"], {}),
             final_report=final_report,
             final_web_result=final_web_result,
+            final_news_brief=final_news_brief,
+            final_system_inspection=final_system_inspection,
             error_message=run_row["error_message"],
             stages=[self._to_stage(row) for row in stage_rows],
             events=[self._to_event(row) for row in event_rows],

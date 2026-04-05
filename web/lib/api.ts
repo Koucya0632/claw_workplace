@@ -5,11 +5,16 @@ import type {
   OpenClawApiResponse,
   OpenClawConfigResponse,
   OpenClawConfigValidationResponse,
+  OpenClawDailyNewsConfigResponse,
   OpenClawDeviceSummary,
   OpenClawHealthResponse,
   OpenClawInstanceResponse,
   OpenClawLogEntry,
   OpenClawOperationLogRecord,
+  OpenClawSystemInspectionConfigResponse,
+  OpenClawWorkflowHandoffPolicy,
+  OpenClawWorkflowRoutingRule,
+  OpenClawWorkflowSpecialistAgents,
   OpenClawWorkflowConfigResponse,
   MarkdownReportResponse,
   ScanSourceResponse,
@@ -17,6 +22,9 @@ import type {
   SearchResponse,
   SourceResponse,
   TaskStatusResponse,
+  WebSearchOutputFormat,
+  WorkflowNewsBriefCreateRequest,
+  WorkflowSystemInspectionCreateRequest,
   WorkflowType,
   WorkflowWebSearchCreateRequest,
   WorkflowRunResponse
@@ -276,11 +284,73 @@ export async function fetchOpenClawWorkflowConfig(instanceId: string) {
 
 export async function updateOpenClawWorkflowConfig(payload: {
   instance_id: string;
+  controller_agent_id: string;
   search_agent_id: string;
   analysis_agent_id: string;
   report_agent_id: string;
+  specialist_agents: OpenClawWorkflowSpecialistAgents;
+  routing_rules: OpenClawWorkflowRoutingRule[];
+  handoff_policy: OpenClawWorkflowHandoffPolicy;
 }) {
   return requestOpenClaw<OpenClawWorkflowConfigResponse>("/openclaw/workflow-config", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchOpenClawDailyNewsConfig(instanceId: string) {
+  const params = new URLSearchParams({ instanceId });
+  return requestOpenClaw<OpenClawDailyNewsConfigResponse>(`/openclaw/daily-news-config?${params.toString()}`);
+}
+
+export async function updateOpenClawDailyNewsConfig(payload: OpenClawDailyNewsConfigResponse | {
+  instance_id: string;
+  enabled: boolean;
+  brief_name: string;
+  topic: string;
+  keywords: string[];
+  industries: string[];
+  regions: string[];
+  people: string[];
+  companies: string[];
+  source_domains: string[];
+  source_urls: string[];
+  must_include: string[];
+  must_exclude: string[];
+  focus_points: string[];
+  output_format: WebSearchOutputFormat;
+  delivery_channel: "telegram" | "discord";
+  telegram_target: string;
+  discord_channel_id: string;
+  schedule_timezone: string;
+  schedule_time: string;
+}) {
+  return requestOpenClaw<OpenClawDailyNewsConfigResponse>("/openclaw/daily-news-config", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchOpenClawSystemInspectionConfig(instanceId: string) {
+  const params = new URLSearchParams({ instanceId });
+  return requestOpenClaw<OpenClawSystemInspectionConfigResponse>(`/openclaw/system-inspection-config?${params.toString()}`);
+}
+
+export async function updateOpenClawSystemInspectionConfig(payload: OpenClawSystemInspectionConfigResponse | {
+  instance_id: string;
+  enabled: boolean;
+  schedule_timezone: string;
+  schedule_time: string;
+  delivery_channel: "telegram" | "discord";
+  telegram_target: string;
+  discord_channel_id: string;
+  version_check_enabled: boolean;
+  log_review_enabled: boolean;
+  log_review_window_hours: number;
+  log_review_limit: number;
+  official_release_url: string;
+}) {
+  return requestOpenClaw<OpenClawSystemInspectionConfigResponse>("/openclaw/system-inspection-config", {
     method: "POST",
     body: JSON.stringify(payload)
   });
@@ -327,5 +397,19 @@ export async function createWebSearchWorkflow(payload: WorkflowWebSearchCreateRe
 export async function continueWorkflowToReport(runId: string) {
   return request<WorkflowRunResponse>(`/workflows/${runId}/continue-to-report`, {
     method: "POST"
+  });
+}
+
+export async function createNewsBriefWorkflow(payload: WorkflowNewsBriefCreateRequest) {
+  return request<WorkflowRunResponse>("/workflows/news-brief", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function createSystemInspectionWorkflow(payload: WorkflowSystemInspectionCreateRequest) {
+  return request<WorkflowRunResponse>("/workflows/system-inspection", {
+    method: "POST",
+    body: JSON.stringify(payload)
   });
 }

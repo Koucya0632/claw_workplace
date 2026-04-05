@@ -5,10 +5,14 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.schemas.workflow import (
+    WORKFLOW_TYPE_NEWS_BRIEF,
     WORKFLOW_TYPE_SEARCH_REPORT,
+    WORKFLOW_TYPE_SYSTEM_INSPECTION,
     WORKFLOW_TYPE_WEB_SEARCH,
+    WorkflowNewsBriefCreateRequest,
     WorkflowRunResponse,
     WorkflowSearchReportCreateRequest,
+    WorkflowSystemInspectionCreateRequest,
     WorkflowWebSearchCreateRequest,
 )
 from app.services.openclaw_errors import OpenClawServiceError
@@ -36,6 +40,28 @@ def create_search_report_workflow(payload: WorkflowSearchReportCreateRequest) ->
 def create_web_search_workflow(payload: WorkflowWebSearchCreateRequest) -> WorkflowRunResponse:
     try:
         run, _ = workflow_service.create_web_search_run(payload)
+        return run
+    except OpenClawServiceError as error:
+        raise HTTPException(status_code=error.status_code or 400, detail=error.detail or error.message) from error
+    except Exception as error:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post("/workflows/news-brief", response_model=WorkflowRunResponse, status_code=status.HTTP_201_CREATED)
+def create_news_brief_workflow(payload: WorkflowNewsBriefCreateRequest) -> WorkflowRunResponse:
+    try:
+        run, _ = workflow_service.create_news_brief_run(payload)
+        return run
+    except OpenClawServiceError as error:
+        raise HTTPException(status_code=error.status_code or 400, detail=error.detail or error.message) from error
+    except Exception as error:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post("/workflows/system-inspection", response_model=WorkflowRunResponse, status_code=status.HTTP_201_CREATED)
+def create_system_inspection_workflow(payload: WorkflowSystemInspectionCreateRequest) -> WorkflowRunResponse:
+    try:
+        run, _ = workflow_service.create_system_inspection_run(payload)
         return run
     except OpenClawServiceError as error:
         raise HTTPException(status_code=error.status_code or 400, detail=error.detail or error.message) from error
@@ -72,7 +98,7 @@ def list_workflow_runs(
     limit: int = Query(20, ge=1, le=100),
 ) -> list[WorkflowRunResponse]:
     try:
-        if workflow_type and workflow_type not in {WORKFLOW_TYPE_SEARCH_REPORT, WORKFLOW_TYPE_WEB_SEARCH}:
+        if workflow_type and workflow_type not in {WORKFLOW_TYPE_SEARCH_REPORT, WORKFLOW_TYPE_WEB_SEARCH, WORKFLOW_TYPE_NEWS_BRIEF, WORKFLOW_TYPE_SYSTEM_INSPECTION}:
             raise HTTPException(status_code=400, detail="workflowType 不合法。")
         runs, _ = workflow_service.list_runs(instance_id=instance_id, workflow_type=workflow_type, limit=limit)
         return runs

@@ -211,14 +211,101 @@ export interface OpenClawLogEntry {
 
 export interface OpenClawWorkflowConfigResponse {
   instance_id: string;
+  controller_agent_id: string;
   search_agent_id: string;
   analysis_agent_id: string;
   report_agent_id: string;
+  specialist_agents: OpenClawWorkflowSpecialistAgents;
+  routing_rules: OpenClawWorkflowRoutingRule[];
+  handoff_policy: OpenClawWorkflowHandoffPolicy;
   created_at: string;
   updated_at: string;
 }
 
-export type WorkflowType = "search_report" | "web_search";
+export interface OpenClawWorkflowSpecialistBinding {
+  agent_id: string;
+  enabled: boolean;
+}
+
+export interface OpenClawWorkflowSpecialistAgents {
+  search_web: OpenClawWorkflowSpecialistBinding;
+  organizer: OpenClawWorkflowSpecialistBinding;
+  writer: OpenClawWorkflowSpecialistBinding;
+  test_design: OpenClawWorkflowSpecialistBinding;
+  ui_review: OpenClawWorkflowSpecialistBinding;
+  monitor: OpenClawWorkflowSpecialistBinding;
+  daily_news_brief: OpenClawWorkflowSpecialistBinding;
+  system_inspection: OpenClawWorkflowSpecialistBinding;
+}
+
+export interface OpenClawWorkflowRoutingRule {
+  key: string;
+  label: string;
+  enabled: boolean;
+  conditions: string[];
+  route_to: string[];
+}
+
+export interface OpenClawWorkflowHandoffPolicy {
+  manual_review_required_on_conflict: boolean;
+  manual_review_required_on_high_risk: boolean;
+  max_search_retry_count: number;
+  max_report_retry_count: number;
+  timeout_escalation_seconds: number;
+  fallback_mode: "controller" | "fail_fast";
+}
+
+export interface OpenClawDailyNewsConfigResponse {
+  instance_id: string;
+  enabled: boolean;
+  brief_name: string;
+  topic: string;
+  keywords: string[];
+  industries: string[];
+  regions: string[];
+  people: string[];
+  companies: string[];
+  source_domains: string[];
+  source_urls: string[];
+  must_include: string[];
+  must_exclude: string[];
+  focus_points: string[];
+  output_format: WebSearchOutputFormat;
+  delivery_channel: "telegram" | "discord";
+  telegram_target: string;
+  discord_channel_id: string;
+  schedule_timezone: string;
+  schedule_time: string;
+  last_scheduled_date?: string | null;
+  last_run_id?: string | null;
+  last_delivery_status?: string | null;
+  last_delivery_error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OpenClawSystemInspectionConfigResponse {
+  instance_id: string;
+  enabled: boolean;
+  schedule_timezone: string;
+  schedule_time: string;
+  delivery_channel: "telegram" | "discord";
+  telegram_target: string;
+  discord_channel_id: string;
+  version_check_enabled: boolean;
+  log_review_enabled: boolean;
+  log_review_window_hours: number;
+  log_review_limit: number;
+  official_release_url: string;
+  last_scheduled_date?: string | null;
+  last_run_id?: string | null;
+  last_delivery_status?: string | null;
+  last_delivery_error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type WorkflowType = "search_report" | "web_search" | "news_brief" | "system_inspection";
 export type WebSearchOutputFormat = "summary" | "bullets" | "table" | "comparison";
 
 export interface WorkflowSearchDocumentItem {
@@ -281,6 +368,109 @@ export interface WorkflowWebSearchResult {
   markdown: string;
 }
 
+export interface WorkflowNewsSourceItem {
+  title: string;
+  snippet: string;
+  source_name: string;
+  reason: string;
+  published_at?: string | null;
+  url?: string | null;
+  domain?: string | null;
+}
+
+export interface WorkflowNewsStory {
+  title: string;
+  summary: string;
+  importance_reason: string;
+  possible_impact: string;
+  sources: WorkflowNewsSourceItem[];
+  published_at?: string | null;
+  background: string;
+  watch_points: string[];
+  event_key: string;
+}
+
+export interface WorkflowNewsBriefPayload {
+  title: string;
+  top_stories: WorkflowNewsStory[];
+  other_stories: WorkflowNewsStory[];
+  trend_summary: string;
+  watch_items: string[];
+  dedupe_notes: string[];
+  uncertainties: string[];
+  raw_sources: WorkflowNewsSourceItem[];
+  markdown: string;
+  delivery_status: string;
+  delivery_target?: string | null;
+  delivery_error?: string | null;
+}
+
+export interface WorkflowSystemInspectionLogIssue {
+  issue_key: string;
+  category: "error" | "warning" | "timeout" | "retry" | "crash" | "performance" | "security" | "config_drift";
+  description: string;
+  frequency: number;
+  first_seen_at?: string | null;
+  last_seen_at?: string | null;
+  possible_root_causes: string[];
+  affected_components: string[];
+  impact_scope: string;
+  severity: "critical" | "high" | "medium" | "low";
+  fix_actions: string[];
+  optimization_actions: string[];
+  priority: "p0" | "p1" | "p2" | "p3";
+  assumptions: string[];
+  verification_steps: string[];
+}
+
+export interface WorkflowSystemInspectionVersionOutput {
+  current_version: string;
+  latest_version?: string | null;
+  latest_version_status: string;
+  version_gap: string;
+  release_summary: string[];
+  breaking_changes: string[];
+  deprecations: string[];
+  compatibility_risks: string[];
+  affected_areas: Record<string, string[]>;
+  upgrade_recommendation: "upgrade_now" | "test_before_upgrade" | "do_not_upgrade_yet";
+  regression_test_checklist: string[];
+  assumptions: string[];
+  verification_steps: string[];
+}
+
+export interface WorkflowSystemInspectionLogReviewOutput {
+  summary: string;
+  issues: WorkflowSystemInspectionLogIssue[];
+  log_window_hours: number;
+  inspected_log_count: number;
+}
+
+export interface WorkflowSystemInspectionRiskOutput {
+  summary: string;
+  upgrade_recommendation: "upgrade_now" | "test_before_upgrade" | "do_not_upgrade_yet";
+  high_priority_risks: WorkflowSystemInspectionLogIssue[];
+  immediate_actions: string[];
+  assumptions: string[];
+  verification_steps: string[];
+}
+
+export interface WorkflowSystemInspectionReportPayload {
+  title: string;
+  inspection_summary: string[];
+  version_update_check: WorkflowSystemInspectionVersionOutput;
+  log_review: WorkflowSystemInspectionLogReviewOutput;
+  high_priority_risks: WorkflowSystemInspectionLogIssue[];
+  fix_and_optimization_actions: string[];
+  open_questions: string[];
+  recommended_execution_order: string[];
+  telegram_summary: string;
+  markdown: string;
+  delivery_status: string;
+  delivery_target?: string | null;
+  delivery_error?: string | null;
+}
+
 export interface WorkflowStageRun {
   id: string;
   stage_key: string;
@@ -318,6 +508,8 @@ export interface WorkflowRunResponse {
   input_payload: Record<string, unknown>;
   final_report?: WorkflowReportPayload | null;
   final_web_result?: WorkflowWebSearchResult | null;
+  final_news_brief?: WorkflowNewsBriefPayload | null;
+  final_system_inspection?: WorkflowSystemInspectionReportPayload | null;
   error_message?: string | null;
   stages: WorkflowStageRun[];
   events: WorkflowEvent[];
@@ -339,4 +531,12 @@ export interface WorkflowWebSearchCreateRequest {
   include_project_sources: boolean;
   source_id?: string;
   result_limit: number;
+}
+
+export interface WorkflowNewsBriefCreateRequest {
+  instance_id: string;
+}
+
+export interface WorkflowSystemInspectionCreateRequest {
+  instance_id: string;
 }

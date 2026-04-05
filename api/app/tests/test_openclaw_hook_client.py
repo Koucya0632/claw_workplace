@@ -104,3 +104,35 @@ def test_dispatch_agent_uses_dedicated_dispatch_timeout(monkeypatch: pytest.Monk
 
     assert captured["timeout"] == 75
     get_settings.cache_clear()
+
+
+def test_dispatch_agent_allows_timeout_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["timeout"] = kwargs["timeout"]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"status": "ok"}),
+            stderr="",
+        )
+
+    monkeypatch.setenv("OPENCLAW_AGENT_DISPATCH_TIMEOUT_SECONDS", "75")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    get_settings.cache_clear()
+
+    client = OpenClawHookClient()
+    client.dispatch_agent(
+        build_instance(),
+        "gateway-token",
+        {
+            "agent_id": "daily-news-brief-agent",
+            "session_key": "news-brief-001",
+            "message": "請整理新聞",
+            "timeout_seconds": 180,
+        },
+    )
+
+    assert captured["timeout"] == 180
+    get_settings.cache_clear()

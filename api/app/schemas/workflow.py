@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 WORKFLOW_STAGE_KEYS = ("search", "analysis", "report")
 WORKFLOW_TYPE_SEARCH_REPORT = "search_report"
 WORKFLOW_TYPE_WEB_SEARCH = "web_search"
+WORKFLOW_TYPE_NEWS_BRIEF = "news_brief"
+WORKFLOW_TYPE_SYSTEM_INSPECTION = "system_inspection"
 WEB_SEARCH_OUTPUT_FORMATS = ("summary", "bullets", "table", "comparison")
 
 
@@ -34,6 +36,14 @@ class WorkflowWebSearchCreateRequest(BaseModel):
     include_project_sources: bool = False
     source_id: Optional[str] = None
     result_limit: int = Field(default=5, ge=1, le=10)
+
+
+class WorkflowNewsBriefCreateRequest(BaseModel):
+    instance_id: str
+
+
+class WorkflowSystemInspectionCreateRequest(BaseModel):
+    instance_id: str
 
 
 class WorkflowSearchDocumentItem(BaseModel):
@@ -151,6 +161,159 @@ class WorkflowWebSearchResult(BaseModel):
     markdown: str
 
 
+class WorkflowNewsSourceItem(BaseModel):
+    title: str
+    snippet: str
+    source_name: str
+    reason: str
+    published_at: Optional[str] = None
+    url: Optional[str] = None
+    domain: Optional[str] = None
+
+
+class WorkflowNewsMonitorOutput(BaseModel):
+    goal_summary: str
+    tracking_scope: list[str] = Field(default_factory=list)
+    search_queries: list[str] = Field(default_factory=list)
+    watch_focus: list[str] = Field(default_factory=list)
+
+
+class WorkflowNewsSearchOutput(BaseModel):
+    summary: str
+    raw_sources: list[WorkflowNewsSourceItem] = Field(default_factory=list)
+
+
+class WorkflowNewsStory(BaseModel):
+    title: str
+    summary: str
+    importance_reason: str
+    possible_impact: str = ""
+    sources: list[WorkflowNewsSourceItem] = Field(default_factory=list)
+    published_at: Optional[str] = None
+    background: str = ""
+    watch_points: list[str] = Field(default_factory=list)
+    event_key: str = ""
+
+
+class WorkflowNewsDedupeOutput(BaseModel):
+    summary: str
+    unique_stories: list[WorkflowNewsStory] = Field(default_factory=list)
+    removed_duplicates: int = 0
+    dedupe_notes: list[str] = Field(default_factory=list)
+
+
+class WorkflowNewsRankOutput(BaseModel):
+    summary: str
+    top_stories: list[WorkflowNewsStory] = Field(default_factory=list)
+    other_stories: list[WorkflowNewsStory] = Field(default_factory=list)
+    trend_summary: str = ""
+    watch_items: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+
+
+class WorkflowNewsBriefPayload(BaseModel):
+    title: str
+    top_stories: list[WorkflowNewsStory] = Field(default_factory=list)
+    other_stories: list[WorkflowNewsStory] = Field(default_factory=list)
+    trend_summary: str
+    watch_items: list[str] = Field(default_factory=list)
+    dedupe_notes: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    raw_sources: list[WorkflowNewsSourceItem] = Field(default_factory=list)
+    markdown: str
+    delivery_status: str = "pending"
+    delivery_target: Optional[str] = None
+    delivery_error: Optional[str] = None
+
+
+class WorkflowSystemInspectionSnapshotOutput(BaseModel):
+    current_version: str = ""
+    latest_touched_version: Optional[str] = None
+    instance_count: int = 0
+    workflow_mapping: dict[str, Any] = Field(default_factory=dict)
+    capability_summary: list[dict[str, Any]] = Field(default_factory=list)
+    plugin_summary: dict[str, Any] = Field(default_factory=dict)
+    recent_workflow_failures: list[dict[str, Any]] = Field(default_factory=list)
+    recent_operation_logs: list[dict[str, Any]] = Field(default_factory=list)
+    gateway_log_excerpt: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class WorkflowSystemInspectionVersionOutput(BaseModel):
+    current_version: str
+    latest_version: Optional[str] = None
+    latest_version_status: str = "unknown"
+    version_gap: str = ""
+    release_summary: list[str] = Field(default_factory=list)
+    breaking_changes: list[str] = Field(default_factory=list)
+    deprecations: list[str] = Field(default_factory=list)
+    compatibility_risks: list[str] = Field(default_factory=list)
+    affected_areas: dict[str, list[str]] = Field(default_factory=dict)
+    upgrade_recommendation: Literal["upgrade_now", "test_before_upgrade", "do_not_upgrade_yet"] = "test_before_upgrade"
+    regression_test_checklist: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    verification_steps: list[str] = Field(default_factory=list)
+
+
+class WorkflowSystemInspectionLogIssue(BaseModel):
+    issue_key: str
+    category: Literal["error", "warning", "timeout", "retry", "crash", "performance", "security", "config_drift"]
+    description: str
+    frequency: int
+    first_seen_at: Optional[str] = None
+    last_seen_at: Optional[str] = None
+    possible_root_causes: list[str] = Field(default_factory=list)
+    affected_components: list[str] = Field(default_factory=list)
+    impact_scope: str = ""
+    severity: Literal["critical", "high", "medium", "low"] = "medium"
+    fix_actions: list[str] = Field(default_factory=list)
+    optimization_actions: list[str] = Field(default_factory=list)
+    priority: Literal["p0", "p1", "p2", "p3"] = "p2"
+    assumptions: list[str] = Field(default_factory=list)
+    verification_steps: list[str] = Field(default_factory=list)
+
+
+class WorkflowSystemInspectionLogReviewOutput(BaseModel):
+    summary: str
+    issues: list[WorkflowSystemInspectionLogIssue] = Field(default_factory=list)
+    log_window_hours: int = 24
+    inspected_log_count: int = 0
+
+
+class WorkflowSystemInspectionRiskOutput(BaseModel):
+    summary: str
+    upgrade_recommendation: Literal["upgrade_now", "test_before_upgrade", "do_not_upgrade_yet"] = "test_before_upgrade"
+    high_priority_risks: list[WorkflowSystemInspectionLogIssue] = Field(default_factory=list)
+    immediate_actions: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    verification_steps: list[str] = Field(default_factory=list)
+
+
+class WorkflowSystemInspectionReportPayload(BaseModel):
+    title: str
+    inspection_summary: list[str] = Field(default_factory=list)
+    version_update_check: WorkflowSystemInspectionVersionOutput
+    log_review: WorkflowSystemInspectionLogReviewOutput
+    high_priority_risks: list[WorkflowSystemInspectionLogIssue] = Field(default_factory=list)
+    fix_and_optimization_actions: list[str] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
+    recommended_execution_order: list[str] = Field(default_factory=list)
+    telegram_summary: str = ""
+    markdown: str
+    delivery_status: str = "pending"
+    delivery_target: Optional[str] = None
+    delivery_error: Optional[str] = None
+
+
+class WorkflowSystemInspectionReportDraft(BaseModel):
+    title: str = "系統巡檢與風險評估報告"
+    inspection_summary: list[str] = Field(default_factory=list)
+    fix_and_optimization_actions: list[str] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
+    recommended_execution_order: list[str] = Field(default_factory=list)
+    telegram_summary: str = ""
+    markdown: str = ""
+
+
 class WorkflowStageRun(BaseModel):
     # 每個階段卡片都直接綁定這個模型，讓 agent / progress / input / output 一次到位。
     id: str
@@ -191,6 +354,8 @@ class WorkflowRunResponse(BaseModel):
     input_payload: dict[str, Any] = Field(default_factory=dict)
     final_report: Optional[WorkflowReportPayload] = None
     final_web_result: Optional[WorkflowWebSearchResult] = None
+    final_news_brief: Optional[WorkflowNewsBriefPayload] = None
+    final_system_inspection: Optional[WorkflowSystemInspectionReportPayload] = None
     error_message: Optional[str] = None
     stages: list[WorkflowStageRun] = Field(default_factory=list)
     events: list[WorkflowEvent] = Field(default_factory=list)
