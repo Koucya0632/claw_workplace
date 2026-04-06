@@ -1,7 +1,13 @@
-# OpenClaw 智能辦公室 Phase 1
+# OpenClaw 智能辦公室
 
-OpenClaw 智能辦公室是以 `搜索 -> 分析 -> 報告` 為核心的本地優先 AI 工作台。  
-這個版本包含：
+OpenClaw 智能辦公室目前是一套本地優先的多 agent 工作台，核心能力已從單純的 `搜索 -> 分析 -> 報告`，擴充到：
+
+- OpenClaw 多 agent / 多通道協作
+- `Web Search + Knowledge Ingest` 搜尋即入庫
+- Daily News / System Inspection / Development 標準化 workflow
+- Sources / Knowledge / Workflow / Delivery 的後台治理能力
+
+目前系統包含：
 
 - `web/`：Next.js 像素風多角色工作台
 - `api/`：FastAPI 後端、SQLite metadata、FTS5 全文搜索
@@ -22,6 +28,20 @@ OpenClaw 智能辦公室是以 `搜索 -> 分析 -> 報告` 為核心的本地�
 2. 安裝依賴
 3. 啟動 API
 4. 啟動 Web
+5. 啟動 OpenClaw Gateway
+
+若只開 Web 或只開 API，管理台會部分可用；若要讓 OpenClaw 管理頁、Discord / Telegram、agent 派發與 workflow 都正常工作，**API 與 Gateway 需要同時存活**。
+
+### 基本環境變數
+
+至少先確認：
+
+```bash
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+API_HOST=0.0.0.0
+API_PORT=8000
+OPENCLAW_DATABASE_PATH=./data/openclaw.sqlite3
+```
 
 ### API
 
@@ -42,11 +62,24 @@ npm install
 npm run dev
 ```
 
+### OpenClaw Gateway
+
+```bash
+cd /Users/rex/Desktop/claw_kaisya
+set -a
+source .env
+set +a
+openclaw gateway
+```
+
+如果 `.env` 裡有 `DISCORD_BOT_TOKEN`、Telegram bot token 或其他 delivery token，請用同一個 shell 先 `source .env` 再啟動 Gateway。
+
 ## 測試
 
 ```bash
 python3 -m pytest api/app/tests
 npm --workspace web run test
+npm --workspace web run build
 ```
 
 ## Phase 1 重點
@@ -65,22 +98,25 @@ MINIMAX_API_URL=https://api.minimaxi.com/v1/chat/completions
 MINIMAX_MODEL=MiniMax-M2.5
 ```
 
-## OpenClaw 管理整合 Phase 1
+## OpenClaw 管理整合
 
 本專案已新增 `OpenClaw 管理` 區域，提供：
 
 - OpenClaw Instance 建立、編輯、健康檢查
 - Agents / Devices / Config / Logs 管理 API 與前端頁面
 - Workflow agent mapping 管理頁，可為每個 instance 指定主控秘書 agent、核心搜索 / 分析 / 報告 agent，以及多個專職 agent
+- Development 管理頁，可建立 `development_execution` workflow
+- Knowledge 管理頁，可回看 ingestion runs、版本鏈與來源治理
 - Daily News Brief 管理頁，可設定新聞主題、關鍵字、來源條件、Telegram 目標與每日排程
 - System Inspection 管理頁，可設定版本更新巡檢、日誌風險評估與 Telegram 摘要推送
+- Sources 頁面已升級成 dashboard + management table + detail drawer，可做搜尋、篩選、排序、同步、編輯、啟用/停用與刪除
 - `/hooks/agent`、`/hooks/wake` 手動派發入口
 - 本專案自己的操作審計紀錄與快照摘要
 - 可選擇為特定 OpenClaw agent 開啟 `search_api`，透過 repo 內原生 plugin 將本專案搜索索引暴露為 native tool
 
 ### 目前建議架構
 
-目前建議採用「1 個主控入口 + 3 個專職 agent + 3 類對外通道」：
+目前建議採用「1 個主控入口 + 4 個專職 agent + 3 類對外通道」：
 
 | 類型 | 角色 | 說明 |
 | --- | --- | --- |
@@ -88,15 +124,17 @@ MINIMAX_MODEL=MiniMax-M2.5
 | 專職 agent | `support-agent` | 內部搜索、讀文件、整理證據，並作為 Discord support 專用頻道入口 |
 | 專職 agent | `daily-news-brief-agent` | Daily News workflow 專職，不作一般聊天入口 |
 | 專職 agent | `system-inspection-agent` | 巡檢 workflow 專職，不作一般聊天入口 |
+| 專職 agent | `fullstack-engineer-agent` | 工程任務唯一執行入口，負責分析、設計、排期、開發、測試、優化與結構化匯報；模型固定走 `openai-codex/gpt-5.4`（OpenAI Codex OAuth） |
 | 互動入口 | `AI Office` | 主聊天 bot 外殼，承接 Telegram / Discord 一般互動 |
-| 報告投遞 | `小新` | Daily News 專用投遞 bot |
-| 報告投遞 | `小巡` | System Inspection 專用投遞 bot |
+| 報告投遞 | `小新` | Daily News 專用 delivery-only bot |
+| 報告投遞 | `小巡` | System Inspection 專用 delivery-only bot |
 
 ### 目前建議通道路由
 
 - Telegram 主入口 -> `main`
 - Discord `#一般` (`1490189668254486650`) -> `main`，需 mention
 - Discord support 專用頻道 (`1490333478942675076`) -> `support-agent`，不需 mention
+- Discord develop 專用頻道 (`1490511097147687035`) -> `fullstack-engineer-agent`，不需 mention
 - Daily News 報告 -> `小新`
 - System Inspection 報告 -> `小巡`
 
@@ -104,22 +142,34 @@ MINIMAX_MODEL=MiniMax-M2.5
 
 - `main` 管入口與整合
 - `support-agent` 管搜尋與 Discord support 專用頻道
+- `fullstack-engineer-agent` 管工程任務執行與標準化匯報
 - `daily-news-brief-agent` / `system-inspection-agent` 只跑各自 workflow
 - 報告投遞 bot 與互動式入口 bot 分離，避免聊天通道與報告通道互相影響
+- `support-agent` / `fullstack-engineer-agent` 在完成任務或到達穩定 checkpoint 後，會透過 agent-to-agent session tool 自動回報給 `main`
 
 ## 一體化搜索-分析-報告流程
 
 新版 `/search` 已整合成主流程工作台，會在同一頁中展示：
 
 - `Project Workflow`：搜索、分析、報告三個固定階段
-- `Web Search`：理解、搜尋、過濾、輸出四個固定階段
+- `Web Search + Ingest`：`understand -> search -> filter -> ingest -> format` 五個固定階段
 - `Daily News Brief`：可在 OpenClaw 管理區設定每日新聞監控、去重、排序、摘要與 Telegram 投遞
 - `System Inspection`：可在 OpenClaw 管理區設定版本巡檢、日誌問題聚合、風險排序與升級建議
+- `Development`：可在 OpenClaw 管理區建立工程任務，強制保留問題定義、需求分析、方案設計、選型、排期、開發、測試、優化與 handoff
 - 每個階段的負責 agent、狀態、進度、輸入與輸出
 - 目前正在處理中的 agent 與整體 workflow 進度
 - 完整事件時間線與最終結構化報告
 - Web Search 可自訂主題、網址 / 網站 / 網域、關鍵字、必須包含 / 排除條件、重點整理欄位與回傳格式
+- 高價值 Web Search 結果會自動走 knowledge ingestion，並依 `topic + domain 集合 + source_type` 合併到既有 source；找不到才新建 source
 - Web Search 完成後可一鍵把結果接續送入分析 / 報告流程
+
+`/openclaw/knowledge` 現在的定位是知識治理與回看頁，用來查看：
+
+- ingestion runs
+- document 版本鏈
+- source 合併與更新結果
+
+它不再是主要接入入口；主要入口已是 `/search` 的 `Web Search + Ingest`。
 
 在啟動流程前，請先到 `OpenClaw 管理 -> Workflow` 為目標 instance 配置：
 
@@ -133,6 +183,47 @@ MINIMAX_MODEL=MiniMax-M2.5
 
 配置完成後，`/search` 送出一次查詢就會自動串行跑完對應階段，並保留整條處理鏈路供回看。
 
+### Development Workflow / Fullstack Engineer Agent
+
+在 `OpenClaw 管理 -> Workflow` 頁面中，可以把 `Fullstack Engineer Agent` 綁到 `specialist_agents.fullstack_engineer`；之後 `OpenClaw 管理 -> Development` 就能建立 `development_execution` workflow。
+
+這條 workflow 固定執行：
+
+- `problem_definition`
+- `requirements_analysis`
+- `solution_design`
+- `technology_selection`
+- `task_planning`
+- `implementation`
+- `testing`
+- `optimization`
+- `handoff`
+
+規則是：
+
+- 前 8 個 stage 都由 `fullstack-engineer-agent` 執行
+- `handoff` 由 `main` 接收並保存最終結構化報告
+- 不允許跳過分析、設計與測試
+- Discord 工程頻道只是 intake / 協作入口；正式追蹤與最終報告仍以 `development_execution` workflow run 為準
+
+Discord 專用工程頻道目前已接到 `fullstack-engineer-agent`，頻道 ID 是 `1490511097147687035`。對應 route 如下：
+
+```json
+{
+  "type": "route",
+  "agentId": "fullstack-engineer-agent",
+  "match": {
+    "channel": "discord",
+    "peer": {
+      "kind": "channel",
+      "id": "1490511097147687035"
+    }
+  }
+}
+```
+
+這個 `channel_id` 目前不在 web UI 管理，若之後變更，需同步更新 repo 內 `.openclaw/openclaw.json` 與實際 OpenClaw runtime config。
+
 ### 啟用前提
 
 - API 執行環境需可呼叫 `openclaw` CLI
@@ -142,13 +233,19 @@ MINIMAX_MODEL=MiniMax-M2.5
 ### OpenClaw 相關環境變數
 
 ```bash
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+API_HOST=0.0.0.0
+API_PORT=8000
+OPENCLAW_DATABASE_PATH=./data/openclaw.sqlite3
 OPENCLAW_CLI_BIN=openclaw
 OPENCLAW_CLI_TIMEOUT_SECONDS=20
 OPENCLAW_AGENT_DISPATCH_TIMEOUT_SECONDS=90
+OPENCLAW_NEWS_AGENT_DISPATCH_TIMEOUT_SECONDS=180
 OPENCLAW_SECRET_KEY=請填入一組固定密鑰
 OPENCLAW_AGENT_TOOL_API_BASE_URL=http://127.0.0.1:8000/api/v1
 OPENCLAW_AGENT_SEARCH_DEFAULT_LIMIT=5
 OPENCLAW_AGENT_DOCUMENT_MAX_CHARS=8000
+DISCORD_BOT_TOKEN=AI Office 主聊天 Discord bot token
 OPENCLAW_DAILY_NEWS_TELEGRAM_BOT_TOKEN=每日新聞專用 Telegram bot token
 OPENCLAW_DAILY_NEWS_TELEGRAM_TIMEOUT_SECONDS=20
 OPENCLAW_DAILY_NEWS_DISCORD_BOT_TOKEN=每日新聞專用 Discord bot token
@@ -157,9 +254,19 @@ OPENCLAW_SYSTEM_INSPECTION_TELEGRAM_BOT_TOKEN=系統巡檢專用 Telegram bot to
 OPENCLAW_SYSTEM_INSPECTION_TELEGRAM_TIMEOUT_SECONDS=20
 OPENCLAW_SYSTEM_INSPECTION_DISCORD_BOT_TOKEN=系統巡檢專用 Discord bot token
 OPENCLAW_SYSTEM_INSPECTION_DISCORD_TIMEOUT_SECONDS=20
+OPENCLAW_KNOWLEDGE_DISCOVERY_TIMEOUT_SECONDS=15
+OPENCLAW_KNOWLEDGE_FETCH_TIMEOUT_SECONDS=20
+OPENCLAW_KNOWLEDGE_DEFAULT_LIMIT=5
 ```
 
 若未設定 `OPENCLAW_SECRET_KEY`，仍可建立 Instance，但帶 token 的建立或更新操作會被拒絕。
+
+可把這些環境變數理解成 4 組：
+
+- 基礎啟動：`NEXT_PUBLIC_API_BASE_URL`、`API_HOST`、`API_PORT`、`OPENCLAW_DATABASE_PATH`
+- OpenClaw / Gateway：`OPENCLAW_*`、`DISCORD_BOT_TOKEN`
+- Daily News / Inspection delivery：`OPENCLAW_DAILY_NEWS_*`、`OPENCLAW_SYSTEM_INSPECTION_*`
+- Knowledge ingest：`OPENCLAW_KNOWLEDGE_*`
 
 ### OpenClaw Agent 搜索能力
 
@@ -244,7 +351,7 @@ System Inspection 的報告推送也可切換 Telegram 或 Discord；Telegram �
 
 ## support-agent 知識接入與沉澱
 
-`support-agent` 現在除了查既有 `project_search` / `project_document` 索引外，也可以走一條新的外部知識接入鏈路：
+`support-agent` 現在除了查既有 `project_search` / `project_document` 索引外，也主理外部知識接入與沉澱。
 
 `搜尋 -> 篩選 -> 下載/提取 -> 清洗 -> 分類 -> 入庫 -> 索引 -> 更新`
 
@@ -256,6 +363,7 @@ System Inspection 的報告推送也可切換 Telegram 或 Discord；Telegram �
 - 直接沉澱到既有 `documents + document_chunks + FTS`，不另建第二套知識庫
 - 為文件補上 `source_url / canonical_url / published_at / business_type / topic_tags / credibility_tier`
 - 支援版本追蹤與更新鏈
+- 這條能力既可以透過 `POST /api/v1/knowledge/ingest` 直接呼叫，也會由 `/search` 的 `Web Search + Ingest` 自動觸發
 
 ### 新增 API
 

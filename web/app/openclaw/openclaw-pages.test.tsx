@@ -5,6 +5,7 @@ import { vi } from "vitest";
 
 import OpenClawActionsPage from "@/app/openclaw/actions/page";
 import OpenClawAgentsPage from "@/app/openclaw/agents/page";
+import OpenClawDevelopmentPage from "@/app/openclaw/development/page";
 import OpenClawDevicesPage from "@/app/openclaw/devices/page";
 import OpenClawKnowledgePage from "@/app/openclaw/knowledge/page";
 import OpenClawOverviewPage from "@/app/openclaw/page";
@@ -25,6 +26,8 @@ vi.mock("@/lib/api", () => ({
   fetchOpenClawOperations: vi.fn(),
   fetchOpenClawAgents: vi.fn(),
   fetchOpenClawDevices: vi.fn(),
+  fetchWorkflowRun: vi.fn(),
+  fetchWorkflowRuns: vi.fn(),
   fetchSources: vi.fn(),
   fetchKnowledgeIngestionRuns: vi.fn(),
   fetchDocumentVersions: vi.fn(),
@@ -34,7 +37,8 @@ vi.mock("@/lib/api", () => ({
   runOpenClawDeviceAction: vi.fn(),
   dispatchOpenClawAgentHook: vi.fn(),
   dispatchOpenClawWakeHook: vi.fn(),
-  createOpenClawAgent: vi.fn()
+  createOpenClawAgent: vi.fn(),
+  createDevelopmentExecutionWorkflow: vi.fn()
 }));
 
 const INSTANCE_FIXTURE = [
@@ -282,5 +286,17 @@ describe("OpenClaw pages", () => {
 
     expect(await screen.findByText("尚無外部知識來源，第一次手動接入後就會自動生成 reusable source。")).toBeInTheDocument();
     expect(screen.getByText("尚無 knowledge ingestion run，先從上方表單執行一次接入。")).toBeInTheDocument();
+  });
+
+  it("renders development workflow console", async () => {
+    mockPathname = "/openclaw/development";
+    vi.mocked(api.fetchOpenClawInstances).mockResolvedValue(INSTANCE_FIXTURE);
+    vi.mocked(api.fetchWorkflowRuns).mockResolvedValue([]);
+
+    render(<OpenClawDevelopmentPage />);
+
+    expect(await screen.findByRole("heading", { name: "Development" })).toBeInTheDocument();
+    expect(screen.getByText("工程任務建立")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "建立工程任務" })).toBeInTheDocument();
   });
 });

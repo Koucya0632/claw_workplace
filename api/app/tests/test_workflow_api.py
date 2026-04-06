@@ -57,6 +57,7 @@ class MockWorkflowCliAdapter:
             {"id": "organizer-agent", "name": "Organizer Agent", "status": "ready"},
             {"id": "analysis-agent", "name": "Analysis Agent", "status": "ready"},
             {"id": "report-agent", "name": "Report Agent", "status": "ready"},
+            {"id": "fullstack-engineer-agent", "name": "Fullstack Engineer Agent", "status": "ready"},
             {"id": "system-inspection-agent", "name": "System Inspection Agent", "status": "ready"},
         ]
 
@@ -79,8 +80,27 @@ class MockWorkflowCliAdapter:
 class MockWorkflowHookClient:
     source_mode = "cli"
 
+    def __init__(self) -> None:
+        self.fail_once_stage_keys: set[str] = set()
+        self.calls_by_stage: dict[str, int] = {}
+
     def dispatch_agent(self, instance, token: str | None, payload: dict[str, Any]) -> dict[str, Any]:
         stage_key = payload["metadata"]["stage_key"]
+        self.calls_by_stage[stage_key] = self.calls_by_stage.get(stage_key, 0) + 1
+        if stage_key in self.fail_once_stage_keys and self.calls_by_stage[stage_key] == 1:
+            raise OpenClawServiceError(
+                "OpenClaw agent 派發失敗。",
+                detail="Profile minimax:cn timed out. Trying next account...",
+                source_mode=self.source_mode,
+                metadata={
+                    "failure_kind": "embedded_model_timeout",
+                    "returncode": 1,
+                    "duration_ms": 1200,
+                    "stdout_preview": "",
+                    "stderr_preview": "Profile minimax:cn timed out. Trying next account...",
+                    "timeout_seconds": payload.get("timeout_seconds"),
+                },
+            )
 
         if stage_key == "understand":
             text = json.dumps(
@@ -451,6 +471,118 @@ class MockWorkflowHookClient:
                 },
                 ensure_ascii=False,
             )
+        elif stage_key == "problem_definition":
+            text = json.dumps(
+                {
+                    "task_name": "優化資料源頁面",
+                    "summary": "需要把資料源頁升級成更完整的管理與可視化後台。",
+                    "problem_background": "現有資料源頁資訊密度不夠，缺少狀態摘要、篩選排序與細部管理能力。",
+                    "goal": "建立可視化與管理效率更高的資料源控制台。",
+                    "constraints": ["沿用現有設計語言", "不能破壞既有 sources API"],
+                    "success_criteria": ["可搜尋篩選", "可查看詳情", "可啟用停用與同步"],
+                },
+                ensure_ascii=False,
+            )
+        elif stage_key == "requirements_analysis":
+            text = json.dumps(
+                {
+                    "summary": "需求已拆成功能、非功能、風險與依賴。",
+                    "functional_requirements": ["顯示 KPI 摘要", "支援搜尋篩選排序", "提供詳情抽屜與管理操作"],
+                    "non_functional_requirements": ["維持頁面可讀性", "狀態資訊可快速掃描"],
+                    "risks": ["來源統計欄位可能不足", "前端表格操作容易變複雜"],
+                    "dependencies": ["sources summary API", "source detail API"],
+                },
+                ensure_ascii=False,
+            )
+        elif stage_key == "solution_design":
+            text = json.dumps(
+                {
+                    "summary": "採 Dashboard + Table + Drawer 模式實作。",
+                    "modules": ["SourceMetricsGrid", "SourcesManagementTable", "SourceDetailDrawer", "SourceFormDialog"],
+                    "flows": ["列表查詢 -> 點擊詳情 -> 編輯 / 同步 / 啟停", "Toolbar 搜尋篩選 -> 表格更新"],
+                    "data_structures": ["SourceMetricsResponse", "SourceDetailResponse", "SourceSyncEventResponse"],
+                    "interfaces": ["GET /api/v1/sources/summary", "GET /api/v1/sources/{id}", "PATCH /api/v1/sources/{id}"],
+                },
+                ensure_ascii=False,
+            )
+        elif stage_key == "technology_selection":
+            text = json.dumps(
+                {
+                    "summary": "沿用現有 FastAPI + Next.js + PixelCard 組件。",
+                    "selections": [
+                        {"category": "frontend", "choice": "Next.js App Router + 現有 workflow components", "reason": "能重用既有後台風格與狀態元件"},
+                        {"category": "backend", "choice": "FastAPI 聚合 API", "reason": "便於提供來源統計與管理操作"},
+                        {"category": "testing", "choice": "pytest + vitest", "reason": "現有專案已建立測試基礎"},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        elif stage_key == "task_planning":
+            text = json.dumps(
+                {
+                    "summary": "拆成 API、UI、狀態表達與驗證四類任務。",
+                    "tasks": [
+                        {"title": "補 sources summary / detail API", "priority": "p0", "estimate": "0.5d", "description": "先提供表格與 KPI 需要的後端資料"},
+                        {"title": "重構 sources page", "priority": "p0", "estimate": "1d", "description": "建立 dashboard、toolbar、table、drawer"},
+                        {"title": "補前後端測試", "priority": "p1", "estimate": "0.5d", "description": "驗證搜尋篩選、狀態顯示與操作流程"},
+                    ],
+                    "schedule": ["Day 1: API + page skeleton", "Day 2: management actions + tests"],
+                },
+                ensure_ascii=False,
+            )
+        elif stage_key == "implementation":
+            text = json.dumps(
+                {
+                    "summary": "已完成資料源頁與來源管理 API 主骨架。",
+                    "completed_items": ["新增 KPI 摘要卡", "補齊來源管理表格", "加入詳情抽屜與編輯入口"],
+                    "changed_modules": ["api/app/routers/sources.py", "web/app/settings/sources/page.tsx", "web/components/source-detail-drawer.tsx"],
+                    "notable_decisions": ["維持單頁管理，不另拆 detail page"],
+                },
+                ensure_ascii=False,
+            )
+        elif stage_key == "testing":
+            text = json.dumps(
+                {
+                    "summary": "已完成主要互動與資料流驗證。",
+                    "test_cases": ["sources page render", "toolbar search/filter", "detail drawer open", "enable/disable actions"],
+                    "test_results": ["sources page render passed", "search/filter passed", "detail drawer passed"],
+                    "validation_status": "passed",
+                    "remaining_gaps": ["尚未加入批次操作測試"],
+                },
+                ensure_ascii=False,
+            )
+        elif stage_key == "optimization":
+            text = json.dumps(
+                {
+                    "summary": "已整理後續可優化方向。",
+                    "improvements": ["補趨勢圖", "加入批次操作", "優化狀態 badge 一致性"],
+                    "follow_up_todos": ["若資料源數量增加，可加入分頁"],
+                    "known_limits": ["第一版沒有趨勢圖表", "批次管理仍未加入"],
+                },
+                ensure_ascii=False,
+            )
+        elif stage_key == "handoff":
+            text = json.dumps(
+                {
+                    "task_name": "優化資料源頁面",
+                    "problem_definition": "現有資料源頁面缺少整體可視化與高效率管理能力，需要升級成完整後台操作台。",
+                    "requirements_analysis": ["需要 KPI 摘要", "需要搜尋篩選排序", "需要詳情與管理操作", "需要清楚狀態表達"],
+                    "solution_design": ["採 Dashboard + Table + Drawer 架構", "後端提供 summary/list/detail/activity API"],
+                    "technology_selection": [
+                        {"category": "frontend", "choice": "Next.js App Router + 既有 Pixel UI 元件", "reason": "能保留風格並快速組裝管理頁"},
+                        {"category": "backend", "choice": "FastAPI 聚合 API", "reason": "能集中輸出 KPI 與來源詳情"},
+                    ],
+                    "task_breakdown_schedule": [
+                        {"title": "補 sources 聚合 API", "priority": "p0", "estimate": "0.5d", "description": "支援 summary、detail、activity"},
+                        {"title": "重構 sources page", "priority": "p0", "estimate": "1d", "description": "完成 KPI、toolbar、table、drawer"},
+                    ],
+                    "development_results": ["資料源頁改為 dashboard 型式", "支援來源詳情、啟停、刪除與同步", "KPI 與狀態 badge 已補齊"],
+                    "test_results": ["pytest passed", "vitest passed", "主要操作流程 smoke test passed"],
+                    "risks_and_todos": ["後續可加入趨勢圖與批次操作", "大量資料源時可能需要分頁"],
+                    "final_summary": "工程任務已按固定流程完成分析、設計、實作、測試與優化，成果可直接交由 Main Agent 對外匯報。",
+                },
+                ensure_ascii=False,
+            )
         elif stage_key == "report" and payload["metadata"].get("workflow_type") == "system_inspection":
             text = json.dumps(
                 {
@@ -671,6 +803,7 @@ def test_workflow_run_happy_path(client: TestClient) -> None:
                 "test_design": {"agent_id": "", "enabled": False},
                 "ui_review": {"agent_id": "", "enabled": False},
                 "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
                 "daily_news_brief": {"agent_id": "", "enabled": False},
                 "system_inspection": {"agent_id": "", "enabled": False},
             },
@@ -744,6 +877,7 @@ def test_web_search_workflow_and_continue_to_report(client: TestClient) -> None:
                 "test_design": {"agent_id": "", "enabled": False},
                 "ui_review": {"agent_id": "", "enabled": False},
                 "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
                 "daily_news_brief": {"agent_id": "", "enabled": False},
                 "system_inspection": {"agent_id": "", "enabled": False},
             },
@@ -815,6 +949,151 @@ def test_web_search_workflow_and_continue_to_report(client: TestClient) -> None:
     assert follow_up["input_payload"]["continued_from_run_id"] == payload["id"]
 
 
+def test_web_search_workflow_retries_embedded_timeout_once(client: TestClient) -> None:
+    install_workflow_services()
+    workflows.workflow_service.hook_client.fail_once_stage_keys.add("understand")
+    instance_id = create_instance(client)
+
+    config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "", "enabled": False},
+                "system_inspection": {"agent_id": "", "enabled": False},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert config_response.status_code == 200
+
+    create_response = client.post(
+        "/api/v1/workflows/web-search",
+        json={
+            "instance_id": instance_id,
+            "topic": "包",
+            "target_urls": [],
+            "target_sites": ["官方網站"],
+            "target_domains": ["example.com"],
+            "keywords": ["包", "方案"],
+            "must_include": ["價格"],
+            "must_exclude": ["舊版"],
+            "focus_points": ["差異", "重點"],
+            "output_format": "bullets",
+            "include_project_sources": True,
+            "source_id": "src_1",
+            "result_limit": 5,
+        },
+    )
+    assert create_response.status_code == 201
+    payload = create_response.json()
+    assert payload["status"] == "completed"
+    assert workflows.workflow_service.hook_client.calls_by_stage["understand"] == 2
+
+    operation_logs = OpenClawOperationLogRepository().list_recent(limit=20, instance_id=instance_id)
+    understand_logs = [log for log in operation_logs if log.operation_type == "dispatch_workflow_stage" and "-understand" in (log.target_id or "")]
+    assert len(understand_logs) >= 2
+    assert any((log.response_summary or {}).get("will_retry") is True for log in understand_logs)
+    assert any(log.status == "success" and (log.response_summary or {}).get("attempt") == 2 for log in understand_logs)
+
+
+def test_development_execution_workflow(client: TestClient) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+
+    config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "", "enabled": False},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert config_response.status_code == 200
+
+    create_response = client.post(
+        "/api/v1/workflows/development-execution",
+        json={
+            "instance_id": instance_id,
+            "task_name": "優化資料源頁面",
+            "problem_background": "資料源頁缺少可視化與高效率管理能力。",
+            "goal": "建立更完整的資料源控制台。",
+            "constraints": ["沿用現有 UI 風格"],
+            "success_criteria": ["支援搜尋篩選", "支援詳情與管理操作"],
+            "context": "需要同時補後端 summary API 與前端表格。",
+            "attachments": ["spec.md"],
+            "references": ["README.md"],
+        },
+    )
+    assert create_response.status_code == 201
+    payload = create_response.json()
+    assert payload["workflow_type"] == "development_execution"
+    assert payload["status"] == "completed"
+    assert payload["final_development_report"]["task_name"] == "優化資料源頁面"
+    assert payload["final_development_report"]["final_summary"].startswith("工程任務已按固定流程完成")
+    assert [stage["stage_key"] for stage in payload["stages"]] == [
+        "problem_definition",
+        "requirements_analysis",
+        "solution_design",
+        "technology_selection",
+        "task_planning",
+        "implementation",
+        "testing",
+        "optimization",
+        "handoff",
+    ]
+    assert all(stage["agent_id"] == "fullstack-engineer-agent" for stage in payload["stages"][:-1])
+    assert payload["stages"][-1]["agent_id"] == "main"
+    assert any(event["message"] == "正在釐清問題背景、目標與成功標準..." for event in payload["events"])
+    assert any(event["message"] == "正在持續測試與驗證開發成果..." for event in payload["events"])
+    assert any("結構化開發報告" in event["message"] for event in payload["events"])
+
+    list_response = client.get("/api/v1/workflows", params={"instanceId": instance_id, "workflowType": "development_execution"})
+    assert list_response.status_code == 200
+    assert len(list_response.json()) == 1
+
+
 def test_daily_news_config_and_news_brief_workflow(client: TestClient) -> None:
     install_workflow_services()
     instance_id = create_instance(client)
@@ -834,6 +1113,7 @@ def test_daily_news_config_and_news_brief_workflow(client: TestClient) -> None:
                 "test_design": {"agent_id": "", "enabled": False},
                 "ui_review": {"agent_id": "", "enabled": False},
                 "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
                 "daily_news_brief": {"agent_id": "main", "enabled": True},
                 "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
             },
@@ -978,6 +1258,7 @@ def test_daily_news_and_system_inspection_support_discord_delivery(client: TestC
                 "test_design": {"agent_id": "", "enabled": False},
                 "ui_review": {"agent_id": "", "enabled": False},
                 "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
                 "daily_news_brief": {"agent_id": "main", "enabled": True},
                 "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
             },
@@ -1161,6 +1442,7 @@ def test_system_inspection_config_and_workflow(client: TestClient) -> None:
                 "test_design": {"agent_id": "", "enabled": False},
                 "ui_review": {"agent_id": "", "enabled": False},
                 "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
                 "daily_news_brief": {"agent_id": "main", "enabled": True},
                 "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
             },

@@ -29,7 +29,16 @@ export function WorkflowRunList({ runs, activeRunId, onSelect }: WorkflowRunList
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <p className="text-sm font-black tracking-[0.08em]">
-                    {String(run.input_payload.query ?? run.input_payload.topic ?? (run.workflow_type === "system_inspection" ? "系統巡檢" : "未命名查詢"))}
+                    {String(
+                      run.input_payload.query ??
+                        run.input_payload.topic ??
+                        run.input_payload.task_name ??
+                        (run.workflow_type === "system_inspection"
+                          ? "系統巡檢"
+                          : run.workflow_type === "development_execution"
+                            ? "工程執行任務"
+                            : "未命名查詢")
+                    )}
                   </p>
                   <p className="mt-1 text-xs text-slate-500">{run.id}</p>
                 </div>
@@ -53,5 +62,6 @@ function workflowTypeLabel(type: WorkflowRunResponse["workflow_type"]) {
   if (type === "web_search") return "web search";
   if (type === "news_brief") return "news brief";
   if (type === "system_inspection") return "system inspection";
+  if (type === "development_execution") return "development";
   return "search report";
 }

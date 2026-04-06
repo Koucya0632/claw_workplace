@@ -136,3 +136,60 @@ def test_dispatch_agent_allows_timeout_override(monkeypatch: pytest.MonkeyPatch)
 
     assert captured["timeout"] == 180
     get_settings.cache_clear()
+
+
+def test_dispatch_agent_includes_dispatch_meta_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"status": "ok", "summary": "done"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    client = OpenClawHookClient()
+    result = client.dispatch_agent(
+        build_instance(),
+        "gateway-token",
+        {
+            "agent_id": "support-agent",
+            "session_key": "ticket:1002",
+            "message": "請整理客服需求",
+        },
+    )
+
+    assert result["status"] == "ok"
+    assert result["_dispatch_meta"]["returncode"] == 0
+    assert isinstance(result["_dispatch_meta"]["duration_ms"], int)
+    assert result["_dispatch_meta"]["timeout_seconds"] == client.timeout_seconds
+
+
+def test_dispatch_agent_nonzero_exit_exposes_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr="Profile minimax:cn timed out. Trying next account...",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    client = OpenClawHookClient()
+    with pytest.raises(Exception) as exc_info:
+        client.dispatch_agent(
+            build_instance(),
+            "gateway-token",
+            {
+                "agent_id": "main",
+                "session_key": "ticket:1003",
+                "message": "請整理客服需求",
+            },
+        )
+
+    error = exc_info.value
+    assert getattr(error, "metadata", {})["failure_kind"] == "embedded_model_timeout"
+    assert getattr(error, "metadata", {})["returncode"] == 1
+    assert "timed out" in getattr(error, "metadata", {})["stderr_preview"]

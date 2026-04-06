@@ -5,10 +5,12 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.schemas.workflow import (
+    WORKFLOW_TYPE_DEVELOPMENT_EXECUTION,
     WORKFLOW_TYPE_NEWS_BRIEF,
     WORKFLOW_TYPE_SEARCH_REPORT,
     WORKFLOW_TYPE_SYSTEM_INSPECTION,
     WORKFLOW_TYPE_WEB_SEARCH,
+    WorkflowDevelopmentExecutionCreateRequest,
     WorkflowNewsBriefCreateRequest,
     WorkflowRunResponse,
     WorkflowSearchReportCreateRequest,
@@ -69,6 +71,17 @@ def create_system_inspection_workflow(payload: WorkflowSystemInspectionCreateReq
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
+@router.post("/workflows/development-execution", response_model=WorkflowRunResponse, status_code=status.HTTP_201_CREATED)
+def create_development_execution_workflow(payload: WorkflowDevelopmentExecutionCreateRequest) -> WorkflowRunResponse:
+    try:
+        run, _ = workflow_service.create_development_execution_run(payload)
+        return run
+    except OpenClawServiceError as error:
+        raise HTTPException(status_code=error.status_code or 400, detail=error.detail or error.message) from error
+    except Exception as error:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 @router.post("/workflows/{run_id}/continue-to-report", response_model=WorkflowRunResponse, status_code=status.HTTP_201_CREATED)
 def continue_workflow_to_report(run_id: str) -> WorkflowRunResponse:
     try:
@@ -98,7 +111,13 @@ def list_workflow_runs(
     limit: int = Query(20, ge=1, le=100),
 ) -> list[WorkflowRunResponse]:
     try:
-        if workflow_type and workflow_type not in {WORKFLOW_TYPE_SEARCH_REPORT, WORKFLOW_TYPE_WEB_SEARCH, WORKFLOW_TYPE_NEWS_BRIEF, WORKFLOW_TYPE_SYSTEM_INSPECTION}:
+        if workflow_type and workflow_type not in {
+            WORKFLOW_TYPE_SEARCH_REPORT,
+            WORKFLOW_TYPE_WEB_SEARCH,
+            WORKFLOW_TYPE_NEWS_BRIEF,
+            WORKFLOW_TYPE_SYSTEM_INSPECTION,
+            WORKFLOW_TYPE_DEVELOPMENT_EXECUTION,
+        }:
             raise HTTPException(status_code=400, detail="workflowType 不合法。")
         runs, _ = workflow_service.list_runs(instance_id=instance_id, workflow_type=workflow_type, limit=limit)
         return runs

@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     openclaw_cli_timeout_seconds: int = Field(default=20, alias="OPENCLAW_CLI_TIMEOUT_SECONDS")
     openclaw_agent_dispatch_timeout_seconds: int = Field(default=90, alias="OPENCLAW_AGENT_DISPATCH_TIMEOUT_SECONDS")
     openclaw_news_agent_dispatch_timeout_seconds: int = Field(default=180, alias="OPENCLAW_NEWS_AGENT_DISPATCH_TIMEOUT_SECONDS")
+    openclaw_workflow_dispatch_retry_count: int = Field(default=1, alias="OPENCLAW_WORKFLOW_DISPATCH_RETRY_COUNT")
+    openclaw_workflow_dispatch_retry_backoff_ms: int = Field(default=1200, alias="OPENCLAW_WORKFLOW_DISPATCH_RETRY_BACKOFF_MS")
     openclaw_secret_key: str = Field(default="", alias="OPENCLAW_SECRET_KEY")
     openclaw_agent_tool_api_base_url: str = Field(default="", alias="OPENCLAW_AGENT_TOOL_API_BASE_URL")
     openclaw_agent_search_default_limit: int = Field(default=5, alias="OPENCLAW_AGENT_SEARCH_DEFAULT_LIMIT")

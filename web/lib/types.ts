@@ -364,6 +364,7 @@ export interface OpenClawWorkflowSpecialistAgents {
   test_design: OpenClawWorkflowSpecialistBinding;
   ui_review: OpenClawWorkflowSpecialistBinding;
   monitor: OpenClawWorkflowSpecialistBinding;
+  fullstack_engineer: OpenClawWorkflowSpecialistBinding;
   daily_news_brief: OpenClawWorkflowSpecialistBinding;
   system_inspection: OpenClawWorkflowSpecialistBinding;
 }
@@ -435,7 +436,7 @@ export interface OpenClawSystemInspectionConfigResponse {
   updated_at: string;
 }
 
-export type WorkflowType = "search_report" | "web_search" | "news_brief" | "system_inspection";
+export type WorkflowType = "search_report" | "web_search" | "news_brief" | "system_inspection" | "development_execution";
 export type WebSearchOutputFormat = "summary" | "bullets" | "table" | "comparison";
 
 export interface WorkflowSearchDocumentItem {
@@ -615,6 +616,90 @@ export interface WorkflowSystemInspectionReportPayload {
   delivery_error?: string | null;
 }
 
+export interface WorkflowDevelopmentProblemDefinitionOutput {
+  task_name: string;
+  summary: string;
+  problem_background: string;
+  goal: string;
+  constraints: string[];
+  success_criteria: string[];
+}
+
+export interface WorkflowDevelopmentRequirementsOutput {
+  summary: string;
+  functional_requirements: string[];
+  non_functional_requirements: string[];
+  risks: string[];
+  dependencies: string[];
+}
+
+export interface WorkflowDevelopmentDesignOutput {
+  summary: string;
+  modules: string[];
+  flows: string[];
+  data_structures: string[];
+  interfaces: string[];
+}
+
+export interface WorkflowDevelopmentTechnologyChoice {
+  category: "frontend" | "backend" | "database" | "testing" | "deployment" | "tooling";
+  choice: string;
+  reason: string;
+}
+
+export interface WorkflowDevelopmentTechnologySelectionOutput {
+  summary: string;
+  selections: WorkflowDevelopmentTechnologyChoice[];
+}
+
+export interface WorkflowDevelopmentTaskItem {
+  title: string;
+  priority: "p0" | "p1" | "p2" | "p3";
+  estimate: string;
+  description: string;
+}
+
+export interface WorkflowDevelopmentTaskPlanningOutput {
+  summary: string;
+  tasks: WorkflowDevelopmentTaskItem[];
+  schedule: string[];
+}
+
+export interface WorkflowDevelopmentImplementationOutput {
+  summary: string;
+  completed_items: string[];
+  changed_modules: string[];
+  notable_decisions: string[];
+}
+
+export interface WorkflowDevelopmentTestingOutput {
+  summary: string;
+  test_cases: string[];
+  test_results: string[];
+  validation_status: "passed" | "partial" | "failed";
+  remaining_gaps: string[];
+}
+
+export interface WorkflowDevelopmentOptimizationOutput {
+  summary: string;
+  improvements: string[];
+  follow_up_todos: string[];
+  known_limits: string[];
+}
+
+export interface WorkflowDevelopmentExecutionReportPayload {
+  task_name: string;
+  problem_definition: string;
+  requirements_analysis: string[];
+  solution_design: string[];
+  technology_selection: WorkflowDevelopmentTechnologyChoice[];
+  task_breakdown_schedule: WorkflowDevelopmentTaskItem[];
+  development_results: string[];
+  test_results: string[];
+  risks_and_todos: string[];
+  final_summary: string;
+}
+
 export interface WorkflowStageRun {
   id: string;
   stage_key: string;
@@ -656,6 +741,7 @@ export interface WorkflowRunResponse {
   final_ingest_result?: WorkflowWebSearchIngestOutput | null;
   final_news_brief?: WorkflowNewsBriefPayload | null;
   final_system_inspection?: WorkflowSystemInspectionReportPayload | null;
+  final_development_report?: WorkflowDevelopmentExecutionReportPayload | null;
   error_message?: string | null;
   stages: WorkflowStageRun[];
   events: WorkflowEvent[];
@@ -689,4 +775,16 @@ export interface WorkflowNewsBriefCreateRequest {
 
 export interface WorkflowSystemInspectionCreateRequest {
   instance_id: string;
+}
+
+export interface WorkflowDevelopmentExecutionCreateRequest {
+  instance_id: string;
+  task_name: string;
+  problem_background: string;
+  goal: string;
+  constraints: string[];
+  success_criteria: string[];
+  context: string;
+  attachments: string[];
+  references: string[];
 }

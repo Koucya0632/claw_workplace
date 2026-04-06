@@ -5,9 +5,11 @@ from typing import Any
 
 from app.repositories.database import adapt_json, get_connection
 from app.schemas.workflow import (
+    WORKFLOW_TYPE_DEVELOPMENT_EXECUTION,
     WORKFLOW_TYPE_NEWS_BRIEF,
     WORKFLOW_TYPE_SYSTEM_INSPECTION,
     WORKFLOW_TYPE_WEB_SEARCH,
+    WorkflowDevelopmentExecutionReportPayload,
     WorkflowEvent,
     WorkflowWebSearchIngestOutput,
     WorkflowNewsBriefPayload,
@@ -123,21 +125,30 @@ class WorkflowRepository:
                 SELECT * FROM workflow_stage_runs
                 WHERE run_id = ?
                 ORDER BY CASE stage_key
-                    WHEN 'understand' THEN 1
-                    WHEN 'monitor' THEN 2
-                    WHEN 'search' THEN 3
-                    WHEN 'snapshot' THEN 4
-                    WHEN 'version_check' THEN 5
-                    WHEN 'log_review' THEN 6
-                    WHEN 'risk_assessment' THEN 7
-                    WHEN 'dedupe' THEN 8
-                    WHEN 'filter' THEN 9
-                    WHEN 'ingest' THEN 10
-                    WHEN 'rank' THEN 11
-                    WHEN 'analysis' THEN 12
-                    WHEN 'format' THEN 13
-                    WHEN 'brief' THEN 14
-                    WHEN 'report' THEN 15
+                    WHEN 'problem_definition' THEN 1
+                    WHEN 'requirements_analysis' THEN 2
+                    WHEN 'solution_design' THEN 3
+                    WHEN 'technology_selection' THEN 4
+                    WHEN 'task_planning' THEN 5
+                    WHEN 'implementation' THEN 6
+                    WHEN 'testing' THEN 7
+                    WHEN 'optimization' THEN 8
+                    WHEN 'handoff' THEN 9
+                    WHEN 'understand' THEN 10
+                    WHEN 'monitor' THEN 11
+                    WHEN 'search' THEN 12
+                    WHEN 'snapshot' THEN 13
+                    WHEN 'version_check' THEN 14
+                    WHEN 'log_review' THEN 15
+                    WHEN 'risk_assessment' THEN 16
+                    WHEN 'dedupe' THEN 17
+                    WHEN 'filter' THEN 18
+                    WHEN 'ingest' THEN 19
+                    WHEN 'rank' THEN 20
+                    WHEN 'analysis' THEN 21
+                    WHEN 'format' THEN 22
+                    WHEN 'brief' THEN 23
+                    WHEN 'report' THEN 24
                     ELSE 99
                 END ASC, created_at ASC
                 """,
@@ -158,6 +169,7 @@ class WorkflowRepository:
         final_ingestion_run_id = None
         final_news_brief = None
         final_system_inspection = None
+        final_development_report = None
         if isinstance(final_payload, dict):
             if run_row["workflow_type"] == WORKFLOW_TYPE_WEB_SEARCH:
                 final_web_result = WorkflowWebSearchResult(**final_payload)
@@ -167,6 +179,8 @@ class WorkflowRepository:
                 final_news_brief = WorkflowNewsBriefPayload(**final_payload)
             elif run_row["workflow_type"] == WORKFLOW_TYPE_SYSTEM_INSPECTION:
                 final_system_inspection = WorkflowSystemInspectionReportPayload(**final_payload)
+            elif run_row["workflow_type"] == WORKFLOW_TYPE_DEVELOPMENT_EXECUTION:
+                final_development_report = WorkflowDevelopmentExecutionReportPayload(**final_payload)
             else:
                 final_report = WorkflowReportPayload(**final_payload)
 
@@ -185,6 +199,7 @@ class WorkflowRepository:
             final_ingest_result=final_ingest_result,
             final_news_brief=final_news_brief,
             final_system_inspection=final_system_inspection,
+            final_development_report=final_development_report,
             error_message=run_row["error_message"],
             stages=[self._to_stage(row) for row in stage_rows],
             events=[self._to_event(row) for row in event_rows],

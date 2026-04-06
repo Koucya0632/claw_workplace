@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import random
 import threading
 import time
 from datetime import datetime, timedelta
@@ -23,11 +24,22 @@ from app.schemas.openclaw_system_inspection import (
 )
 from app.schemas.openclaw_workflow_config import OpenClawWorkflowConfigResponse, OpenClawWorkflowConfigUpdateRequest
 from app.schemas.workflow import (
+    WORKFLOW_TYPE_DEVELOPMENT_EXECUTION,
     WORKFLOW_TYPE_NEWS_BRIEF,
     WORKFLOW_TYPE_SEARCH_REPORT,
     WORKFLOW_TYPE_SYSTEM_INSPECTION,
     WORKFLOW_TYPE_WEB_SEARCH,
     WorkflowAnalysisStageOutput,
+    WorkflowDevelopmentDesignOutput,
+    WorkflowDevelopmentExecutionCreateRequest,
+    WorkflowDevelopmentExecutionReportPayload,
+    WorkflowDevelopmentImplementationOutput,
+    WorkflowDevelopmentOptimizationOutput,
+    WorkflowDevelopmentProblemDefinitionOutput,
+    WorkflowDevelopmentRequirementsOutput,
+    WorkflowDevelopmentTaskPlanningOutput,
+    WorkflowDevelopmentTechnologySelectionOutput,
+    WorkflowDevelopmentTestingOutput,
     WorkflowNewsBriefCreateRequest,
     WorkflowNewsBriefPayload,
     WorkflowNewsDedupeOutput,
@@ -82,11 +94,31 @@ SNAPSHOT_STAGE_KEY = "snapshot"
 VERSION_CHECK_STAGE_KEY = "version_check"
 LOG_REVIEW_STAGE_KEY = "log_review"
 RISK_ASSESSMENT_STAGE_KEY = "risk_assessment"
+PROBLEM_DEFINITION_STAGE_KEY = "problem_definition"
+REQUIREMENTS_ANALYSIS_STAGE_KEY = "requirements_analysis"
+SOLUTION_DESIGN_STAGE_KEY = "solution_design"
+TECHNOLOGY_SELECTION_STAGE_KEY = "technology_selection"
+TASK_PLANNING_STAGE_KEY = "task_planning"
+IMPLEMENTATION_STAGE_KEY = "implementation"
+TESTING_STAGE_KEY = "testing"
+OPTIMIZATION_STAGE_KEY = "optimization"
+HANDOFF_STAGE_KEY = "handoff"
 
 SEARCH_REPORT_STAGE_SEQUENCE = (SEARCH_STAGE_KEY, ANALYSIS_STAGE_KEY, REPORT_STAGE_KEY)
 WEB_SEARCH_STAGE_SEQUENCE = (UNDERSTAND_STAGE_KEY, SEARCH_STAGE_KEY, FILTER_STAGE_KEY, INGEST_STAGE_KEY, FORMAT_STAGE_KEY)
 NEWS_BRIEF_STAGE_SEQUENCE = (MONITOR_STAGE_KEY, SEARCH_STAGE_KEY, DEDUPE_STAGE_KEY, RANK_STAGE_KEY, BRIEF_STAGE_KEY)
 SYSTEM_INSPECTION_STAGE_SEQUENCE = (SNAPSHOT_STAGE_KEY, VERSION_CHECK_STAGE_KEY, LOG_REVIEW_STAGE_KEY, RISK_ASSESSMENT_STAGE_KEY, REPORT_STAGE_KEY)
+DEVELOPMENT_EXECUTION_STAGE_SEQUENCE = (
+    PROBLEM_DEFINITION_STAGE_KEY,
+    REQUIREMENTS_ANALYSIS_STAGE_KEY,
+    SOLUTION_DESIGN_STAGE_KEY,
+    TECHNOLOGY_SELECTION_STAGE_KEY,
+    TASK_PLANNING_STAGE_KEY,
+    IMPLEMENTATION_STAGE_KEY,
+    TESTING_STAGE_KEY,
+    OPTIMIZATION_STAGE_KEY,
+    HANDOFF_STAGE_KEY,
+)
 
 SEARCH_REPORT_RUN_PROGRESS_START = {
     SEARCH_STAGE_KEY: 5,
@@ -167,6 +199,39 @@ SYSTEM_INSPECTION_STAGE_RUNNING_PROGRESS = {
     LOG_REVIEW_STAGE_KEY: 58,
     RISK_ASSESSMENT_STAGE_KEY: 80,
     REPORT_STAGE_KEY: 94,
+}
+DEVELOPMENT_EXECUTION_RUN_PROGRESS_START = {
+    PROBLEM_DEFINITION_STAGE_KEY: 5,
+    REQUIREMENTS_ANALYSIS_STAGE_KEY: 16,
+    SOLUTION_DESIGN_STAGE_KEY: 28,
+    TECHNOLOGY_SELECTION_STAGE_KEY: 40,
+    TASK_PLANNING_STAGE_KEY: 52,
+    IMPLEMENTATION_STAGE_KEY: 66,
+    TESTING_STAGE_KEY: 80,
+    OPTIMIZATION_STAGE_KEY: 90,
+    HANDOFF_STAGE_KEY: 96,
+}
+DEVELOPMENT_EXECUTION_RUN_PROGRESS_DONE = {
+    PROBLEM_DEFINITION_STAGE_KEY: 12,
+    REQUIREMENTS_ANALYSIS_STAGE_KEY: 24,
+    SOLUTION_DESIGN_STAGE_KEY: 36,
+    TECHNOLOGY_SELECTION_STAGE_KEY: 48,
+    TASK_PLANNING_STAGE_KEY: 60,
+    IMPLEMENTATION_STAGE_KEY: 75,
+    TESTING_STAGE_KEY: 88,
+    OPTIMIZATION_STAGE_KEY: 96,
+    HANDOFF_STAGE_KEY: 100,
+}
+DEVELOPMENT_EXECUTION_STAGE_RUNNING_PROGRESS = {
+    PROBLEM_DEFINITION_STAGE_KEY: 10,
+    REQUIREMENTS_ANALYSIS_STAGE_KEY: 22,
+    SOLUTION_DESIGN_STAGE_KEY: 34,
+    TECHNOLOGY_SELECTION_STAGE_KEY: 46,
+    TASK_PLANNING_STAGE_KEY: 58,
+    IMPLEMENTATION_STAGE_KEY: 72,
+    TESTING_STAGE_KEY: 85,
+    OPTIMIZATION_STAGE_KEY: 94,
+    HANDOFF_STAGE_KEY: 98,
 }
 
 
@@ -453,6 +518,8 @@ class SearchReportWorkflowService:
         self.release_client = release_client or OpenClawReleaseClient()
         self.secret_cipher = secret_cipher or OpenClawSecretCipher(settings.openclaw_secret_key)
         self.news_agent_dispatch_timeout_seconds = settings.openclaw_news_agent_dispatch_timeout_seconds
+        self.workflow_dispatch_retry_count = max(0, settings.openclaw_workflow_dispatch_retry_count)
+        self.workflow_dispatch_retry_backoff_ms = max(0, settings.openclaw_workflow_dispatch_retry_backoff_ms)
         self.run_inline = run_inline
 
     def create_run(self, payload: WorkflowSearchReportCreateRequest) -> tuple[WorkflowRunResponse, int]:
@@ -609,6 +676,44 @@ class SearchReportWorkflowService:
         self._start_run(run.id)
         return self.workflow_repository.get_run(run.id), _elapsed_ms(started_at)
 
+    def create_development_execution_run(self, payload: WorkflowDevelopmentExecutionCreateRequest) -> tuple[WorkflowRunResponse, int]:
+        started_at = time.perf_counter()
+        self._ensure_instance_exists(payload.instance_id)
+        config = self._get_config_or_error(payload.instance_id)
+        stage_agents = _resolve_development_stage_agents(config)
+
+        run = self.workflow_repository.create_run(
+            instance_id=payload.instance_id,
+            workflow_type=WORKFLOW_TYPE_DEVELOPMENT_EXECUTION,
+            input_payload={
+                **payload.model_dump(),
+                "controller_agent_id": config.controller_agent_id,
+                "specialist_snapshot": _specialist_snapshot(config),
+            },
+            stage_configs=[
+                {"stage_key": PROBLEM_DEFINITION_STAGE_KEY, "agent_id": stage_agents[PROBLEM_DEFINITION_STAGE_KEY]},
+                {"stage_key": REQUIREMENTS_ANALYSIS_STAGE_KEY, "agent_id": stage_agents[REQUIREMENTS_ANALYSIS_STAGE_KEY]},
+                {"stage_key": SOLUTION_DESIGN_STAGE_KEY, "agent_id": stage_agents[SOLUTION_DESIGN_STAGE_KEY]},
+                {"stage_key": TECHNOLOGY_SELECTION_STAGE_KEY, "agent_id": stage_agents[TECHNOLOGY_SELECTION_STAGE_KEY]},
+                {"stage_key": TASK_PLANNING_STAGE_KEY, "agent_id": stage_agents[TASK_PLANNING_STAGE_KEY]},
+                {"stage_key": IMPLEMENTATION_STAGE_KEY, "agent_id": stage_agents[IMPLEMENTATION_STAGE_KEY]},
+                {"stage_key": TESTING_STAGE_KEY, "agent_id": stage_agents[TESTING_STAGE_KEY]},
+                {"stage_key": OPTIMIZATION_STAGE_KEY, "agent_id": stage_agents[OPTIMIZATION_STAGE_KEY]},
+                {"stage_key": HANDOFF_STAGE_KEY, "agent_id": stage_agents[HANDOFF_STAGE_KEY]},
+            ],
+        )
+        self.workflow_repository.add_event(
+            run_id=run.id,
+            stage_key=None,
+            agent_id=config.controller_agent_id,
+            status="pending",
+            progress_percent=0,
+            message="主控秘書已建立 Development Workflow，正將工程任務派交全端工程師 Agent。",
+            payload={"task_name": payload.task_name, "stage_agents": stage_agents},
+        )
+        self._start_run(run.id)
+        return self.workflow_repository.get_run(run.id), _elapsed_ms(started_at)
+
     def continue_to_report(self, run_id: str) -> tuple[WorkflowRunResponse, int]:
         started_at = time.perf_counter()
         web_run = self.workflow_repository.get_run(run_id)
@@ -732,6 +837,8 @@ class SearchReportWorkflowService:
                 self._execute_news_brief_run(run.id)
             elif run.workflow_type == WORKFLOW_TYPE_SYSTEM_INSPECTION:
                 self._execute_system_inspection_run(run.id)
+            elif run.workflow_type == WORKFLOW_TYPE_DEVELOPMENT_EXECUTION:
+                self._execute_development_execution_run(run.id)
             else:
                 self._execute_search_report_run(run.id)
         except OpenClawServiceError:
@@ -1046,6 +1153,108 @@ class SearchReportWorkflowService:
                 progress_percent=100,
                 message="主控秘書已完成系統巡檢整合與風險建議整理。",
                 payload={"upgrade_recommendation": report_output.version_update_check.upgrade_recommendation, "delivery_status": delivery_status},
+            )
+        except OpenClawServiceError as error:
+            self._mark_run_failed(run.id, error)
+
+    def _execute_development_execution_run(self, run_id: str) -> None:
+        run = self.workflow_repository.get_run(run_id)
+        config = self._get_config_or_error(run.instance_id)
+        stage_agents = _resolve_development_stage_agents(config)
+
+        try:
+            self._add_controller_event(
+                run_id=run.id,
+                controller_agent_id=config.controller_agent_id,
+                progress_percent=2,
+                message="主控秘書已接手工程任務，要求全端工程師 Agent 依序完成分析、設計、排期、開發與測試。",
+                payload={"task_name": run.input_payload.get("task_name"), "stage_agents": stage_agents},
+            )
+            problem_output = self._run_development_problem_definition_stage(run, stage_agents[PROBLEM_DEFINITION_STAGE_KEY])
+            requirements_output = self._run_development_requirements_stage(
+                self.workflow_repository.get_run(run.id),
+                stage_agents[REQUIREMENTS_ANALYSIS_STAGE_KEY],
+                problem_output,
+            )
+            design_output = self._run_development_design_stage(
+                self.workflow_repository.get_run(run.id),
+                stage_agents[SOLUTION_DESIGN_STAGE_KEY],
+                problem_output,
+                requirements_output,
+            )
+            technology_output = self._run_development_technology_stage(
+                self.workflow_repository.get_run(run.id),
+                stage_agents[TECHNOLOGY_SELECTION_STAGE_KEY],
+                problem_output,
+                requirements_output,
+                design_output,
+            )
+            planning_output = self._run_development_task_planning_stage(
+                self.workflow_repository.get_run(run.id),
+                stage_agents[TASK_PLANNING_STAGE_KEY],
+                problem_output,
+                requirements_output,
+                design_output,
+                technology_output,
+            )
+            implementation_output = self._run_development_implementation_stage(
+                self.workflow_repository.get_run(run.id),
+                stage_agents[IMPLEMENTATION_STAGE_KEY],
+                problem_output,
+                design_output,
+                planning_output,
+            )
+            testing_output = self._run_development_testing_stage(
+                self.workflow_repository.get_run(run.id),
+                stage_agents[TESTING_STAGE_KEY],
+                problem_output,
+                planning_output,
+                implementation_output,
+            )
+            optimization_output = self._run_development_optimization_stage(
+                self.workflow_repository.get_run(run.id),
+                stage_agents[OPTIMIZATION_STAGE_KEY],
+                planning_output,
+                implementation_output,
+                testing_output,
+            )
+            handoff_output = self._run_development_handoff_stage(
+                self.workflow_repository.get_run(run.id),
+                stage_agents[HANDOFF_STAGE_KEY],
+                problem_output,
+                requirements_output,
+                design_output,
+                technology_output,
+                planning_output,
+                implementation_output,
+                testing_output,
+                optimization_output,
+            )
+
+            self.workflow_repository.update_run_status(
+                run_id=run.id,
+                status="completed",
+                current_stage=HANDOFF_STAGE_KEY,
+                active_agent_id=stage_agents[HANDOFF_STAGE_KEY],
+                overall_progress_percent=100,
+                final_payload=handoff_output.model_dump(),
+                error_message=None,
+            )
+            self._add_controller_event(
+                run_id=run.id,
+                controller_agent_id=config.controller_agent_id,
+                progress_percent=100,
+                message="主控秘書已收到全端工程師 Agent 的結構化開發報告。",
+                payload={"task_name": handoff_output.task_name, "final_summary": handoff_output.final_summary},
+            )
+            self.workflow_repository.add_event(
+                run_id=run.id,
+                stage_key=HANDOFF_STAGE_KEY,
+                agent_id=stage_agents[HANDOFF_STAGE_KEY],
+                status="completed",
+                progress_percent=100,
+                message="工程任務已完成結構化匯報，可回看完整分析、設計、開發與測試結果。",
+                payload={"task_name": handoff_output.task_name},
             )
         except OpenClawServiceError as error:
             self._mark_run_failed(run.id, error)
@@ -1908,6 +2117,310 @@ class SearchReportWorkflowService:
             self._mark_stage_failed(run_id=run.id, stage_key=BRIEF_STAGE_KEY, agent_id=agent_id, error=error)
             raise
 
+    def _run_development_structured_stage(
+        self,
+        *,
+        run: WorkflowRunResponse,
+        agent_id: str,
+        stage_key: str,
+        input_payload: dict[str, Any],
+        message: str,
+        prompt: str,
+        schema,
+        completion_message: str,
+        completion_payload: dict[str, Any],
+    ):
+        self._mark_stage_running(
+            run_id=run.id,
+            stage_key=stage_key,
+            agent_id=agent_id,
+            input_payload=input_payload,
+            run_progress=DEVELOPMENT_EXECUTION_RUN_PROGRESS_START[stage_key],
+            stage_progress=DEVELOPMENT_EXECUTION_STAGE_RUNNING_PROGRESS[stage_key],
+            message=message,
+        )
+        try:
+            response_payload = self._dispatch_agent(
+                instance_id=run.instance_id,
+                agent_id=agent_id,
+                session_key=f"{run.id}-{stage_key}",
+                message=prompt,
+                metadata={"workflow_run_id": run.id, "stage_key": stage_key, "workflow_type": run.workflow_type},
+            )
+            output = _parse_agent_output(response_payload, schema, f"Development {stage_key} 階段")
+            self.workflow_repository.update_stage(
+                run_id=run.id,
+                stage_key=stage_key,
+                status="completed",
+                progress_percent=100,
+                output_payload=output.model_dump(),
+                completed_at=utc_now_iso(),
+            )
+            self.workflow_repository.update_run_status(
+                run_id=run.id,
+                status="running",
+                current_stage=stage_key,
+                active_agent_id=agent_id,
+                overall_progress_percent=DEVELOPMENT_EXECUTION_RUN_PROGRESS_DONE[stage_key],
+                error_message=None,
+            )
+            self.workflow_repository.add_event(
+                run_id=run.id,
+                stage_key=stage_key,
+                agent_id=agent_id,
+                status="completed",
+                progress_percent=DEVELOPMENT_EXECUTION_RUN_PROGRESS_DONE[stage_key],
+                message=completion_message,
+                payload=completion_payload,
+            )
+            return output
+        except OpenClawServiceError as error:
+            self._mark_stage_failed(run_id=run.id, stage_key=stage_key, agent_id=agent_id, error=error)
+            raise
+
+    def _run_development_problem_definition_stage(
+        self,
+        run: WorkflowRunResponse,
+        agent_id: str,
+    ) -> WorkflowDevelopmentProblemDefinitionOutput:
+        input_payload = {
+            "task_name": run.input_payload.get("task_name"),
+            "problem_background": run.input_payload.get("problem_background"),
+            "goal": run.input_payload.get("goal"),
+            "constraints": run.input_payload.get("constraints"),
+            "success_criteria": run.input_payload.get("success_criteria"),
+            "context": run.input_payload.get("context"),
+            "attachments": run.input_payload.get("attachments"),
+            "references": run.input_payload.get("references"),
+        }
+        return self._run_development_structured_stage(
+            run=run,
+            agent_id=agent_id,
+            stage_key=PROBLEM_DEFINITION_STAGE_KEY,
+            input_payload=input_payload,
+            message="正在釐清問題背景、目標與成功標準...",
+            prompt=_build_development_problem_definition_prompt(input_payload),
+            schema=WorkflowDevelopmentProblemDefinitionOutput,
+            completion_message="問題定義已完成，已明確任務背景、目標、限制與成功標準。",
+            completion_payload={"task_name": input_payload.get("task_name")},
+        )
+
+    def _run_development_requirements_stage(
+        self,
+        run: WorkflowRunResponse,
+        agent_id: str,
+        problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+    ) -> WorkflowDevelopmentRequirementsOutput:
+        input_payload = {"problem_definition": problem_output.model_dump()}
+        return self._run_development_structured_stage(
+            run=run,
+            agent_id=agent_id,
+            stage_key=REQUIREMENTS_ANALYSIS_STAGE_KEY,
+            input_payload=input_payload,
+            message="正在分析功能需求、非功能需求、風險與依賴項...",
+            prompt=_build_development_requirements_prompt(problem_output),
+            schema=WorkflowDevelopmentRequirementsOutput,
+            completion_message="需求分析已完成，已整理功能、非功能需求、風險與依賴。",
+            completion_payload={
+                "functional_count": len(problem_output.success_criteria),
+                "risk_count_hint": 0,
+            },
+        )
+
+    def _run_development_design_stage(
+        self,
+        run: WorkflowRunResponse,
+        agent_id: str,
+        problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+        requirements_output: WorkflowDevelopmentRequirementsOutput,
+    ) -> WorkflowDevelopmentDesignOutput:
+        input_payload = {
+            "problem_definition": problem_output.model_dump(),
+            "requirements_analysis": requirements_output.model_dump(),
+        }
+        return self._run_development_structured_stage(
+            run=run,
+            agent_id=agent_id,
+            stage_key=SOLUTION_DESIGN_STAGE_KEY,
+            input_payload=input_payload,
+            message="正在設計可落地的模組、流程、資料結構與介面...",
+            prompt=_build_development_design_prompt(problem_output, requirements_output),
+            schema=WorkflowDevelopmentDesignOutput,
+            completion_message="方案設計已完成，已整理模組、流程與介面規劃。",
+            completion_payload={"module_count": len(requirements_output.functional_requirements)},
+        )
+
+    def _run_development_technology_stage(
+        self,
+        run: WorkflowRunResponse,
+        agent_id: str,
+        problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+        requirements_output: WorkflowDevelopmentRequirementsOutput,
+        design_output: WorkflowDevelopmentDesignOutput,
+    ) -> WorkflowDevelopmentTechnologySelectionOutput:
+        input_payload = {
+            "problem_definition": problem_output.model_dump(),
+            "requirements_analysis": requirements_output.model_dump(),
+            "solution_design": design_output.model_dump(),
+        }
+        return self._run_development_structured_stage(
+            run=run,
+            agent_id=agent_id,
+            stage_key=TECHNOLOGY_SELECTION_STAGE_KEY,
+            input_payload=input_payload,
+            message="正在完成技術選型與理由說明...",
+            prompt=_build_development_technology_prompt(problem_output, requirements_output, design_output),
+            schema=WorkflowDevelopmentTechnologySelectionOutput,
+            completion_message="技術選型已完成，已說明採用方案與選擇理由。",
+            completion_payload={"selection_count": len(design_output.modules)},
+        )
+
+    def _run_development_task_planning_stage(
+        self,
+        run: WorkflowRunResponse,
+        agent_id: str,
+        problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+        requirements_output: WorkflowDevelopmentRequirementsOutput,
+        design_output: WorkflowDevelopmentDesignOutput,
+        technology_output: WorkflowDevelopmentTechnologySelectionOutput,
+    ) -> WorkflowDevelopmentTaskPlanningOutput:
+        input_payload = {
+            "problem_definition": problem_output.model_dump(),
+            "requirements_analysis": requirements_output.model_dump(),
+            "solution_design": design_output.model_dump(),
+            "technology_selection": technology_output.model_dump(),
+        }
+        return self._run_development_structured_stage(
+            run=run,
+            agent_id=agent_id,
+            stage_key=TASK_PLANNING_STAGE_KEY,
+            input_payload=input_payload,
+            message="正在拆分任務、安排優先級與預估排期...",
+            prompt=_build_development_task_planning_prompt(problem_output, requirements_output, design_output, technology_output),
+            schema=WorkflowDevelopmentTaskPlanningOutput,
+            completion_message="任務拆分與排期已完成，已整理優先級與預估時程。",
+            completion_payload={"task_count": len(technology_output.selections)},
+        )
+
+    def _run_development_implementation_stage(
+        self,
+        run: WorkflowRunResponse,
+        agent_id: str,
+        problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+        design_output: WorkflowDevelopmentDesignOutput,
+        planning_output: WorkflowDevelopmentTaskPlanningOutput,
+    ) -> WorkflowDevelopmentImplementationOutput:
+        input_payload = {
+            "problem_definition": problem_output.model_dump(),
+            "solution_design": design_output.model_dump(),
+            "task_planning": planning_output.model_dump(),
+        }
+        return self._run_development_structured_stage(
+            run=run,
+            agent_id=agent_id,
+            stage_key=IMPLEMENTATION_STAGE_KEY,
+            input_payload=input_payload,
+            message="正在依照計畫執行開發實作...",
+            prompt=_build_development_implementation_prompt(problem_output, design_output, planning_output),
+            schema=WorkflowDevelopmentImplementationOutput,
+            completion_message="開發實作階段已完成，已整理完成項目與變更模組。",
+            completion_payload={"task_count": len(planning_output.tasks)},
+        )
+
+    def _run_development_testing_stage(
+        self,
+        run: WorkflowRunResponse,
+        agent_id: str,
+        problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+        planning_output: WorkflowDevelopmentTaskPlanningOutput,
+        implementation_output: WorkflowDevelopmentImplementationOutput,
+    ) -> WorkflowDevelopmentTestingOutput:
+        input_payload = {
+            "problem_definition": problem_output.model_dump(),
+            "task_planning": planning_output.model_dump(),
+            "implementation": implementation_output.model_dump(),
+        }
+        return self._run_development_structured_stage(
+            run=run,
+            agent_id=agent_id,
+            stage_key=TESTING_STAGE_KEY,
+            input_payload=input_payload,
+            message="正在持續測試與驗證開發成果...",
+            prompt=_build_development_testing_prompt(problem_output, planning_output, implementation_output),
+            schema=WorkflowDevelopmentTestingOutput,
+            completion_message="測試與驗證已完成，已整理測試結果與剩餘缺口。",
+            completion_payload={"completed_items": len(implementation_output.completed_items)},
+        )
+
+    def _run_development_optimization_stage(
+        self,
+        run: WorkflowRunResponse,
+        agent_id: str,
+        planning_output: WorkflowDevelopmentTaskPlanningOutput,
+        implementation_output: WorkflowDevelopmentImplementationOutput,
+        testing_output: WorkflowDevelopmentTestingOutput,
+    ) -> WorkflowDevelopmentOptimizationOutput:
+        input_payload = {
+            "task_planning": planning_output.model_dump(),
+            "implementation": implementation_output.model_dump(),
+            "testing": testing_output.model_dump(),
+        }
+        return self._run_development_structured_stage(
+            run=run,
+            agent_id=agent_id,
+            stage_key=OPTIMIZATION_STAGE_KEY,
+            input_payload=input_payload,
+            message="正在根據測試結果與回饋持續優化...",
+            prompt=_build_development_optimization_prompt(planning_output, implementation_output, testing_output),
+            schema=WorkflowDevelopmentOptimizationOutput,
+            completion_message="優化階段已完成，已整理改進方向、風險與待辦。",
+            completion_payload={"improvement_count": len(testing_output.test_results)},
+        )
+
+    def _run_development_handoff_stage(
+        self,
+        run: WorkflowRunResponse,
+        agent_id: str,
+        problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+        requirements_output: WorkflowDevelopmentRequirementsOutput,
+        design_output: WorkflowDevelopmentDesignOutput,
+        technology_output: WorkflowDevelopmentTechnologySelectionOutput,
+        planning_output: WorkflowDevelopmentTaskPlanningOutput,
+        implementation_output: WorkflowDevelopmentImplementationOutput,
+        testing_output: WorkflowDevelopmentTestingOutput,
+        optimization_output: WorkflowDevelopmentOptimizationOutput,
+    ) -> WorkflowDevelopmentExecutionReportPayload:
+        input_payload = {
+            "problem_definition": problem_output.model_dump(),
+            "requirements_analysis": requirements_output.model_dump(),
+            "solution_design": design_output.model_dump(),
+            "technology_selection": technology_output.model_dump(),
+            "task_planning": planning_output.model_dump(),
+            "implementation": implementation_output.model_dump(),
+            "testing": testing_output.model_dump(),
+            "optimization": optimization_output.model_dump(),
+        }
+        return self._run_development_structured_stage(
+            run=run,
+            agent_id=agent_id,
+            stage_key=HANDOFF_STAGE_KEY,
+            input_payload=input_payload,
+            message="主控秘書正在接收全端工程師 Agent 的結構化開發報告...",
+            prompt=_build_development_handoff_prompt(
+                problem_output,
+                requirements_output,
+                design_output,
+                technology_output,
+                planning_output,
+                implementation_output,
+                testing_output,
+                optimization_output,
+            ),
+            schema=WorkflowDevelopmentExecutionReportPayload,
+            completion_message="已完成結構化匯報並交還給 Main Agent。",
+            completion_payload={"task_name": problem_output.task_name, "final_summary": optimization_output.summary},
+        )
+
     def _run_system_snapshot_stage(
         self,
         run: WorkflowRunResponse,
@@ -2352,50 +2865,90 @@ class SearchReportWorkflowService:
         metadata: dict[str, Any],
     ) -> dict[str, Any]:
         instance, token = self._load_context(instance_id)
+        timeout_seconds = self.news_agent_dispatch_timeout_seconds if metadata.get("workflow_type") in {WORKFLOW_TYPE_NEWS_BRIEF, WORKFLOW_TYPE_SYSTEM_INSPECTION} else None
         request_summary = {
             "agent_id": agent_id,
             "session_key": session_key,
+            "workflow_run_id": metadata.get("workflow_run_id"),
+            "workflow_type": metadata.get("workflow_type"),
+            "stage_key": metadata.get("stage_key"),
+            "timeout_seconds": timeout_seconds,
             "message_preview": truncate_text(message, 200),
         }
-        try:
-            timeout_seconds = self.news_agent_dispatch_timeout_seconds if metadata.get("workflow_type") in {WORKFLOW_TYPE_NEWS_BRIEF, WORKFLOW_TYPE_SYSTEM_INSPECTION} else None
-            result = self.hook_client.dispatch_agent(
-                instance,
-                token,
-                {
-                    "agent_id": agent_id,
-                    "session_key": session_key,
-                    "message": message,
-                    "deliver": False,
-                    "metadata": metadata,
-                    "timeout_seconds": timeout_seconds,
-                },
-            )
-            self.operation_log_repository.create(
-                instance_id=instance_id,
-                operation_type="dispatch_workflow_stage",
-                target_type="workflow_stage",
-                target_id=f"{agent_id}:{session_key}",
-                status="success",
-                error_message=None,
-                request_summary=request_summary,
-                response_summary={"status": result.get("status"), "summary": result.get("summary")},
-                source_mode=self.hook_client.source_mode,
-            )
-            return result
-        except OpenClawServiceError as error:
-            self.operation_log_repository.create(
-                instance_id=instance_id,
-                operation_type="dispatch_workflow_stage",
-                target_type="workflow_stage",
-                target_id=f"{agent_id}:{session_key}",
-                status="failed",
-                error_message=error.detail or error.message,
-                request_summary=request_summary,
-                response_summary=None,
-                source_mode=error.source_mode or self.hook_client.source_mode,
-            )
-            raise
+        max_attempts = 1 + self.workflow_dispatch_retry_count
+        retryable_failure_kinds = {"embedded_model_timeout", "dispatch_timeout"}
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = self.hook_client.dispatch_agent(
+                    instance,
+                    token,
+                    {
+                        "agent_id": agent_id,
+                        "session_key": session_key,
+                        "message": message,
+                        "deliver": False,
+                        "metadata": metadata,
+                        "timeout_seconds": timeout_seconds,
+                    },
+                )
+                dispatch_meta = result.get("_dispatch_meta") if isinstance(result, dict) else None
+                self.operation_log_repository.create(
+                    instance_id=instance_id,
+                    operation_type="dispatch_workflow_stage",
+                    target_type="workflow_stage",
+                    target_id=f"{agent_id}:{session_key}",
+                    status="success",
+                    error_message=None,
+                    request_summary={**request_summary, "attempt": attempt, "max_attempts": max_attempts},
+                    response_summary={
+                        "status": result.get("status"),
+                        "summary": result.get("summary"),
+                        "returncode": dispatch_meta.get("returncode") if isinstance(dispatch_meta, dict) else None,
+                        "duration_ms": dispatch_meta.get("duration_ms") if isinstance(dispatch_meta, dict) else None,
+                        "stdout_preview": dispatch_meta.get("stdout_preview") if isinstance(dispatch_meta, dict) else None,
+                        "stderr_preview": dispatch_meta.get("stderr_preview") if isinstance(dispatch_meta, dict) else None,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                    },
+                    source_mode=self.hook_client.source_mode,
+                )
+                return result
+            except OpenClawServiceError as error:
+                error_meta = error.metadata if isinstance(error.metadata, dict) else {}
+                failure_kind = error_meta.get("failure_kind")
+                will_retry = attempt < max_attempts and failure_kind in retryable_failure_kinds
+                self.operation_log_repository.create(
+                    instance_id=instance_id,
+                    operation_type="dispatch_workflow_stage",
+                    target_type="workflow_stage",
+                    target_id=f"{agent_id}:{session_key}",
+                    status="failed",
+                    error_message=error.detail or error.message,
+                    request_summary={**request_summary, "attempt": attempt, "max_attempts": max_attempts},
+                    response_summary={
+                        "failure_kind": failure_kind,
+                        "returncode": error_meta.get("returncode"),
+                        "duration_ms": error_meta.get("duration_ms"),
+                        "stdout_preview": error_meta.get("stdout_preview"),
+                        "stderr_preview": error_meta.get("stderr_preview"),
+                        "timeout_seconds": error_meta.get("timeout_seconds"),
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "will_retry": will_retry,
+                    },
+                    source_mode=error.source_mode or self.hook_client.source_mode,
+                )
+                if not will_retry:
+                    raise
+                sleep_ms = self.workflow_dispatch_retry_backoff_ms + random.randint(0, 300)
+                time.sleep(sleep_ms / 1000)
+
+        raise OpenClawServiceError(
+            "OpenClaw agent 派發失敗。",
+            detail="dispatch workflow stage exhausted retries",
+            source_mode=self.hook_client.source_mode,
+        )
 
     def _mark_stage_failed(self, *, run_id: str, stage_key: str, agent_id: str, error: OpenClawServiceError) -> None:
         self.workflow_repository.update_stage(
@@ -3173,6 +3726,201 @@ def _build_system_report_prompt(
     )
 
 
+def _build_development_problem_definition_prompt(request_payload: dict[str, Any]) -> str:
+    return (
+        "你是全端工程師 Agent。這是 Development Workflow 的第一階段，你不可跳過分析、設計與測試導向思維。\n"
+        f"原始任務：{json.dumps(request_payload, ensure_ascii=False)}\n"
+        "請先明確問題背景、目標、限制與成功標準。只輸出 JSON。\n"
+        "{\n"
+        '  "task_name": "...",\n'
+        '  "summary": "...",\n'
+        '  "problem_background": "...",\n'
+        '  "goal": "...",\n'
+        '  "constraints": ["..."],\n'
+        '  "success_criteria": ["..."]\n'
+        "}\n"
+        "不要輸出額外文字。"
+    )
+
+
+def _build_development_requirements_prompt(problem_output: WorkflowDevelopmentProblemDefinitionOutput) -> str:
+    return (
+        "你是全端工程師 Agent，現在處於需求分析階段。請基於已確認的問題定義，分析功能需求、非功能需求、風險與依賴項。\n"
+        f"問題定義：{json.dumps(problem_output.model_dump(), ensure_ascii=False)}\n"
+        "只輸出 JSON。\n"
+        "{\n"
+        '  "summary": "...",\n'
+        '  "functional_requirements": ["..."],\n'
+        '  "non_functional_requirements": ["..."],\n'
+        '  "risks": ["..."],\n'
+        '  "dependencies": ["..."]\n'
+        "}\n"
+        "不要輸出額外文字。"
+    )
+
+
+def _build_development_design_prompt(
+    problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+    requirements_output: WorkflowDevelopmentRequirementsOutput,
+) -> str:
+    return (
+        "你是全端工程師 Agent，現在處於方案設計階段。請設計可落地的模組、流程、資料結構與介面。\n"
+        f"問題定義：{json.dumps(problem_output.model_dump(), ensure_ascii=False)}\n"
+        f"需求分析：{json.dumps(requirements_output.model_dump(), ensure_ascii=False)}\n"
+        "只輸出 JSON。\n"
+        "{\n"
+        '  "summary": "...",\n'
+        '  "modules": ["..."],\n'
+        '  "flows": ["..."],\n'
+        '  "data_structures": ["..."],\n'
+        '  "interfaces": ["..."]\n'
+        "}\n"
+        "不要輸出額外文字。"
+    )
+
+
+def _build_development_technology_prompt(
+    problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+    requirements_output: WorkflowDevelopmentRequirementsOutput,
+    design_output: WorkflowDevelopmentDesignOutput,
+) -> str:
+    return (
+        "你是全端工程師 Agent，現在處於技術選型階段。請說明採用哪些技術與原因。\n"
+        f"問題定義：{json.dumps(problem_output.model_dump(), ensure_ascii=False)}\n"
+        f"需求分析：{json.dumps(requirements_output.model_dump(), ensure_ascii=False)}\n"
+        f"方案設計：{json.dumps(design_output.model_dump(), ensure_ascii=False)}\n"
+        "只輸出 JSON。\n"
+        "{\n"
+        '  "summary": "...",\n'
+        '  "selections": [{"category":"frontend|backend|database|testing|deployment|tooling", "choice":"...", "reason":"..."}]\n'
+        "}\n"
+        "不要輸出額外文字。"
+    )
+
+
+def _build_development_task_planning_prompt(
+    problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+    requirements_output: WorkflowDevelopmentRequirementsOutput,
+    design_output: WorkflowDevelopmentDesignOutput,
+    technology_output: WorkflowDevelopmentTechnologySelectionOutput,
+) -> str:
+    return (
+        "你是全端工程師 Agent，現在處於任務拆分 / 排期階段。請安排優先級與預估排期。\n"
+        f"問題定義：{json.dumps(problem_output.model_dump(), ensure_ascii=False)}\n"
+        f"需求分析：{json.dumps(requirements_output.model_dump(), ensure_ascii=False)}\n"
+        f"方案設計：{json.dumps(design_output.model_dump(), ensure_ascii=False)}\n"
+        f"技術選型：{json.dumps(technology_output.model_dump(), ensure_ascii=False)}\n"
+        "只輸出 JSON。\n"
+        "{\n"
+        '  "summary": "...",\n'
+        '  "tasks": [{"title":"...", "priority":"p0|p1|p2|p3", "estimate":"...", "description":"..."}],\n'
+        '  "schedule": ["..."]\n'
+        "}\n"
+        "不要輸出額外文字。"
+    )
+
+
+def _build_development_implementation_prompt(
+    problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+    design_output: WorkflowDevelopmentDesignOutput,
+    planning_output: WorkflowDevelopmentTaskPlanningOutput,
+) -> str:
+    return (
+        "你是全端工程師 Agent，現在處於開發階段。請依照既有設計與排期完成實作摘要。\n"
+        f"問題定義：{json.dumps(problem_output.model_dump(), ensure_ascii=False)}\n"
+        f"方案設計：{json.dumps(design_output.model_dump(), ensure_ascii=False)}\n"
+        f"任務拆分：{json.dumps(planning_output.model_dump(), ensure_ascii=False)}\n"
+        "只輸出 JSON。\n"
+        "{\n"
+        '  "summary": "...",\n'
+        '  "completed_items": ["..."],\n'
+        '  "changed_modules": ["..."],\n'
+        '  "notable_decisions": ["..."]\n'
+        "}\n"
+        "不要輸出額外文字。"
+    )
+
+
+def _build_development_testing_prompt(
+    problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+    planning_output: WorkflowDevelopmentTaskPlanningOutput,
+    implementation_output: WorkflowDevelopmentImplementationOutput,
+) -> str:
+    return (
+        "你是全端工程師 Agent，現在處於持續測試階段。請基於實作結果整理測試案例、測試結果與剩餘缺口。\n"
+        f"問題定義：{json.dumps(problem_output.model_dump(), ensure_ascii=False)}\n"
+        f"任務拆分：{json.dumps(planning_output.model_dump(), ensure_ascii=False)}\n"
+        f"開發結果：{json.dumps(implementation_output.model_dump(), ensure_ascii=False)}\n"
+        "只輸出 JSON。\n"
+        "{\n"
+        '  "summary": "...",\n'
+        '  "test_cases": ["..."],\n'
+        '  "test_results": ["..."],\n'
+        '  "validation_status": "passed|partial|failed",\n'
+        '  "remaining_gaps": ["..."]\n'
+        "}\n"
+        "不要輸出額外文字。"
+    )
+
+
+def _build_development_optimization_prompt(
+    planning_output: WorkflowDevelopmentTaskPlanningOutput,
+    implementation_output: WorkflowDevelopmentImplementationOutput,
+    testing_output: WorkflowDevelopmentTestingOutput,
+) -> str:
+    return (
+        "你是全端工程師 Agent，現在處於迭代優化階段。請根據測試結果與回饋整理可執行的優化。\n"
+        f"任務拆分：{json.dumps(planning_output.model_dump(), ensure_ascii=False)}\n"
+        f"開發結果：{json.dumps(implementation_output.model_dump(), ensure_ascii=False)}\n"
+        f"測試結果：{json.dumps(testing_output.model_dump(), ensure_ascii=False)}\n"
+        "只輸出 JSON。\n"
+        "{\n"
+        '  "summary": "...",\n'
+        '  "improvements": ["..."],\n'
+        '  "follow_up_todos": ["..."],\n'
+        '  "known_limits": ["..."]\n'
+        "}\n"
+        "不要輸出額外文字。"
+    )
+
+
+def _build_development_handoff_prompt(
+    problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+    requirements_output: WorkflowDevelopmentRequirementsOutput,
+    design_output: WorkflowDevelopmentDesignOutput,
+    technology_output: WorkflowDevelopmentTechnologySelectionOutput,
+    planning_output: WorkflowDevelopmentTaskPlanningOutput,
+    implementation_output: WorkflowDevelopmentImplementationOutput,
+    testing_output: WorkflowDevelopmentTestingOutput,
+    optimization_output: WorkflowDevelopmentOptimizationOutput,
+) -> str:
+    return (
+        "你是 Main Agent，現在處於 Development Workflow 的 handoff 階段。請接收全端工程師 Agent 的完整成果，整理成固定結構化報告。\n"
+        f"問題定義：{json.dumps(problem_output.model_dump(), ensure_ascii=False)}\n"
+        f"需求分析：{json.dumps(requirements_output.model_dump(), ensure_ascii=False)}\n"
+        f"方案設計：{json.dumps(design_output.model_dump(), ensure_ascii=False)}\n"
+        f"技術選型：{json.dumps(technology_output.model_dump(), ensure_ascii=False)}\n"
+        f"任務拆分：{json.dumps(planning_output.model_dump(), ensure_ascii=False)}\n"
+        f"開發結果：{json.dumps(implementation_output.model_dump(), ensure_ascii=False)}\n"
+        f"測試結果：{json.dumps(testing_output.model_dump(), ensure_ascii=False)}\n"
+        f"優化結果：{json.dumps(optimization_output.model_dump(), ensure_ascii=False)}\n"
+        "只輸出 JSON。\n"
+        "{\n"
+        '  "task_name": "...",\n'
+        '  "problem_definition": "...",\n'
+        '  "requirements_analysis": ["..."],\n'
+        '  "solution_design": ["..."],\n'
+        '  "technology_selection": [{"category":"...", "choice":"...", "reason":"..."}],\n'
+        '  "task_breakdown_schedule": [{"title":"...", "priority":"p0|p1|p2|p3", "estimate":"...", "description":"..."}],\n'
+        '  "development_results": ["..."],\n'
+        '  "test_results": ["..."],\n'
+        '  "risks_and_todos": ["..."],\n'
+        '  "final_summary": "..."\n'
+        "}\n"
+        "不要輸出額外文字。"
+    )
+
+
 def _compact_news_source_item(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "title": truncate_text(str(item.get("title") or ""), max_length=140),
@@ -3520,6 +4268,8 @@ def _extract_final_payload(run: WorkflowRunResponse) -> dict[str, Any] | None:
         return run.final_news_brief.model_dump()
     if run.final_system_inspection is not None:
         return run.final_system_inspection.model_dump()
+    if run.final_development_report is not None:
+        return run.final_development_report.model_dump()
     return None
 
 
@@ -3579,6 +4329,21 @@ def _resolve_system_inspection_stage_agents(config: OpenClawWorkflowConfigRespon
         LOG_REVIEW_STAGE_KEY: specialist_agent_id,
         RISK_ASSESSMENT_STAGE_KEY: specialist_agent_id,
         REPORT_STAGE_KEY: config.controller_agent_id,
+    }
+
+
+def _resolve_development_stage_agents(config: OpenClawWorkflowConfigResponse) -> dict[str, str]:
+    specialist_agent_id = _resolve_specialist_agent(config, "fullstack_engineer", config.controller_agent_id)
+    return {
+        PROBLEM_DEFINITION_STAGE_KEY: specialist_agent_id,
+        REQUIREMENTS_ANALYSIS_STAGE_KEY: specialist_agent_id,
+        SOLUTION_DESIGN_STAGE_KEY: specialist_agent_id,
+        TECHNOLOGY_SELECTION_STAGE_KEY: specialist_agent_id,
+        TASK_PLANNING_STAGE_KEY: specialist_agent_id,
+        IMPLEMENTATION_STAGE_KEY: specialist_agent_id,
+        TESTING_STAGE_KEY: specialist_agent_id,
+        OPTIMIZATION_STAGE_KEY: specialist_agent_id,
+        HANDOFF_STAGE_KEY: config.controller_agent_id,
     }
 
 

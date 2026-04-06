@@ -22,7 +22,7 @@ import type {
 const WORKFLOW_ROLES = [
   { name: "Secretary Controller", tagline: "主控秘書", status: "running", quote: "我會接手需求、拆分任務、分派專職 agent、整合結果，並在異常時決定是否人工接管。" },
   { name: "Core Specialists", tagline: "核心流程", status: "ready", quote: "搜索、分析、報告三槽會維持主流程穩定運作，避免既有 `/search` workflow 失效。" },
-  { name: "Extended Specialists", tagline: "專職池", status: "ready", quote: "Web 搜索、整理、寫作、測試設計、UI 檢查、流程監控都能各自映射到獨立 agent。" },
+  { name: "Extended Specialists", tagline: "專職池", status: "ready", quote: "Web 搜索、整理、寫作、全端工程、測試設計、UI 檢查、流程監控都能各自映射到獨立 agent。" },
   { name: "Policy Layer", tagline: "分派 / 接管規則", status: "ready", quote: "routing rules 與 handoff policy 會定義何時派工、何時降級、何時升級人工處理。" }
 ];
 
@@ -73,6 +73,7 @@ const DEFAULT_SPECIALISTS: OpenClawWorkflowSpecialistAgents = {
   test_design: { agent_id: "", enabled: false },
   ui_review: { agent_id: "", enabled: false },
   monitor: { agent_id: "", enabled: false },
+  fullstack_engineer: { agent_id: "", enabled: false },
   daily_news_brief: { agent_id: "", enabled: false },
   system_inspection: { agent_id: "", enabled: false }
 };
@@ -81,6 +82,7 @@ const SPECIALIST_FIELDS: Array<{ key: keyof OpenClawWorkflowSpecialistAgents; la
   { key: "search_web", label: "Web 搜索代理", description: "外部網站 / 網域條件搜尋" },
   { key: "organizer", label: "整理代理", description: "去重、分類、結構化整理" },
   { key: "writer", label: "寫作代理", description: "正式報告、回覆稿、對外交付" },
+  { key: "fullstack_engineer", label: "Fullstack Engineer Agent", description: "工程任務唯一執行入口，負責分析、設計、排期、開發、測試與匯報" },
   { key: "test_design", label: "測試設計代理", description: "測試案例、驗收條件、驗證清單" },
   { key: "ui_review", label: "UI 檢查代理", description: "UI 文案、流程清晰度、交互檢查" },
   { key: "monitor", label: "流程監控代理", description: "超時、失敗、重試與人工接管提示" },

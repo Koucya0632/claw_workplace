@@ -31,6 +31,7 @@ import type {
   TaskStatusResponse,
   WebSearchOutputFormat,
   WorkflowNewsBriefCreateRequest,
+  WorkflowDevelopmentExecutionCreateRequest,
   WorkflowSystemInspectionCreateRequest,
   WorkflowType,
   WorkflowWebSearchCreateRequest,
@@ -523,6 +524,13 @@ export async function createNewsBriefWorkflow(payload: WorkflowNewsBriefCreateRe
 
 export async function createSystemInspectionWorkflow(payload: WorkflowSystemInspectionCreateRequest) {
   return request<WorkflowRunResponse>("/workflows/system-inspection", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function createDevelopmentExecutionWorkflow(payload: WorkflowDevelopmentExecutionCreateRequest) {
+  return request<WorkflowRunResponse>("/workflows/development-execution", {
     method: "POST",
     body: JSON.stringify(payload)
   });

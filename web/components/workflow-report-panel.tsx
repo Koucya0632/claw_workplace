@@ -19,9 +19,23 @@ export function WorkflowReportPanel({
   const webResult = run?.final_web_result;
   const newsBrief = run?.final_news_brief;
   const systemInspection = run?.final_system_inspection;
+  const developmentReport = run?.final_development_report;
 
   return (
-    <PixelCard title={report ? "最終報告" : webResult ? "Web Search 結果" : systemInspection ? "巡檢報告" : "最終結果"} eyebrow="Result">
+    <PixelCard
+      title={
+        report
+          ? "最終報告"
+          : webResult
+            ? "Web Search 結果"
+            : systemInspection
+              ? "巡檢報告"
+              : developmentReport
+                ? "工程任務報告"
+                : "最終結果"
+      }
+      eyebrow="Result"
+    >
       {report ? (
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3 border-4 border-ink bg-sand p-4">
@@ -103,6 +117,93 @@ export function WorkflowReportPanel({
                 <pre className="pixel-scrollbar mt-3 max-h-[420px] overflow-auto bg-slate-50 p-3 text-xs leading-6 whitespace-pre-wrap">
                   {report.markdown}
                 </pre>
+              </article>
+            </div>
+          </div>
+        </div>
+      ) : developmentReport ? (
+        <div className="space-y-4">
+          <div className="border-4 border-ink bg-sand p-4">
+            <h3 className="text-lg font-black tracking-[0.08em]">{developmentReport.task_name}</h3>
+            <p className="mt-2 text-sm leading-7 text-slate-700">{developmentReport.final_summary}</p>
+          </div>
+
+          <div className="grid gap-4 xl:grid-cols-[1fr_0.95fr]">
+            <div className="space-y-4">
+              <article className="border-4 border-ink bg-white p-4">
+                <h4 className="text-sm font-black tracking-[0.08em]">問題定義</h4>
+                <p className="mt-3 text-sm leading-7">{developmentReport.problem_definition}</p>
+              </article>
+              <article className="border-4 border-ink bg-white p-4">
+                <h4 className="text-sm font-black tracking-[0.08em]">需求分析</h4>
+                <ul className="mt-3 space-y-2 text-sm leading-7">
+                  {developmentReport.requirements_analysis.map((item) => (
+                    <li key={item}>- {item}</li>
+                  ))}
+                </ul>
+              </article>
+              <article className="border-4 border-ink bg-white p-4">
+                <h4 className="text-sm font-black tracking-[0.08em]">方案設計</h4>
+                <ul className="mt-3 space-y-2 text-sm leading-7">
+                  {developmentReport.solution_design.map((item) => (
+                    <li key={item}>- {item}</li>
+                  ))}
+                </ul>
+              </article>
+              <article className="border-4 border-ink bg-white p-4">
+                <h4 className="text-sm font-black tracking-[0.08em]">開發成果</h4>
+                <ul className="mt-3 space-y-2 text-sm leading-7">
+                  {developmentReport.development_results.map((item) => (
+                    <li key={item}>- {item}</li>
+                  ))}
+                </ul>
+              </article>
+              <article className="border-4 border-ink bg-white p-4">
+                <h4 className="text-sm font-black tracking-[0.08em]">測試結果</h4>
+                <ul className="mt-3 space-y-2 text-sm leading-7">
+                  {developmentReport.test_results.map((item) => (
+                    <li key={item}>- {item}</li>
+                  ))}
+                </ul>
+              </article>
+            </div>
+
+            <div className="space-y-4">
+              <article className="border-4 border-ink bg-white p-4">
+                <h4 className="text-sm font-black tracking-[0.08em]">技術選型</h4>
+                <div className="mt-3 space-y-3">
+                  {developmentReport.technology_selection.map((item) => (
+                    <div key={`${item.category}-${item.choice}`} className="border-4 border-ink bg-sand p-3 text-sm">
+                      <p className="font-black">{item.category}</p>
+                      <p className="mt-2 leading-7">{item.choice}</p>
+                      <p className="mt-2 text-xs text-slate-500">{item.reason}</p>
+                    </div>
+                  ))}
+                </div>
+              </article>
+              <article className="border-4 border-ink bg-white p-4">
+                <h4 className="text-sm font-black tracking-[0.08em]">任務拆分 / 排期</h4>
+                <div className="mt-3 space-y-3">
+                  {developmentReport.task_breakdown_schedule.map((item) => (
+                    <div key={`${item.title}-${item.priority}`} className="border-4 border-ink bg-sand p-3 text-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="font-black">{item.title}</p>
+                        <span className="text-xs uppercase tracking-[0.12em] text-slate-500">
+                          {item.priority} / {item.estimate}
+                        </span>
+                      </div>
+                      <p className="mt-2 leading-7">{item.description}</p>
+                    </div>
+                  ))}
+                </div>
+              </article>
+              <article className="border-4 border-ink bg-white p-4">
+                <h4 className="text-sm font-black tracking-[0.08em]">風險與待辦</h4>
+                <ul className="mt-3 space-y-2 text-sm leading-7">
+                  {developmentReport.risks_and_todos.map((item) => (
+                    <li key={item}>- {item}</li>
+                  ))}
+                </ul>
               </article>
             </div>
           </div>

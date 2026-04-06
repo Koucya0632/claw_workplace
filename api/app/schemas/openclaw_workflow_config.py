@@ -20,6 +20,7 @@ class OpenClawWorkflowSpecialistAgents(BaseModel):
     test_design: OpenClawWorkflowSpecialistBinding = Field(default_factory=OpenClawWorkflowSpecialistBinding)
     ui_review: OpenClawWorkflowSpecialistBinding = Field(default_factory=OpenClawWorkflowSpecialistBinding)
     monitor: OpenClawWorkflowSpecialistBinding = Field(default_factory=OpenClawWorkflowSpecialistBinding)
+    fullstack_engineer: OpenClawWorkflowSpecialistBinding = Field(default_factory=OpenClawWorkflowSpecialistBinding)
     daily_news_brief: OpenClawWorkflowSpecialistBinding = Field(default_factory=OpenClawWorkflowSpecialistBinding)
     system_inspection: OpenClawWorkflowSpecialistBinding = Field(default_factory=OpenClawWorkflowSpecialistBinding)
 

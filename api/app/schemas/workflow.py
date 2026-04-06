@@ -13,6 +13,7 @@ WORKFLOW_TYPE_SEARCH_REPORT = "search_report"
 WORKFLOW_TYPE_WEB_SEARCH = "web_search"
 WORKFLOW_TYPE_NEWS_BRIEF = "news_brief"
 WORKFLOW_TYPE_SYSTEM_INSPECTION = "system_inspection"
+WORKFLOW_TYPE_DEVELOPMENT_EXECUTION = "development_execution"
 WEB_SEARCH_OUTPUT_FORMATS = ("summary", "bullets", "table", "comparison")
 
 
@@ -50,6 +51,18 @@ class WorkflowNewsBriefCreateRequest(BaseModel):
 
 class WorkflowSystemInspectionCreateRequest(BaseModel):
     instance_id: str
+
+
+class WorkflowDevelopmentExecutionCreateRequest(BaseModel):
+    instance_id: str
+    task_name: str
+    problem_background: str
+    goal: str
+    constraints: list[str] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list)
+    context: str = ""
+    attachments: list[str] = Field(default_factory=list)
+    references: list[str] = Field(default_factory=list)
 
 
 class WorkflowSearchDocumentItem(BaseModel):
@@ -338,6 +351,90 @@ class WorkflowSystemInspectionReportDraft(BaseModel):
     markdown: str = ""
 
 
+class WorkflowDevelopmentProblemDefinitionOutput(BaseModel):
+    task_name: str
+    summary: str
+    problem_background: str
+    goal: str
+    constraints: list[str] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list)
+
+
+class WorkflowDevelopmentRequirementsOutput(BaseModel):
+    summary: str
+    functional_requirements: list[str] = Field(default_factory=list)
+    non_functional_requirements: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+
+
+class WorkflowDevelopmentDesignOutput(BaseModel):
+    summary: str
+    modules: list[str] = Field(default_factory=list)
+    flows: list[str] = Field(default_factory=list)
+    data_structures: list[str] = Field(default_factory=list)
+    interfaces: list[str] = Field(default_factory=list)
+
+
+class WorkflowDevelopmentTechnologyChoice(BaseModel):
+    category: str
+    choice: str
+    reason: str
+
+
+class WorkflowDevelopmentTechnologySelectionOutput(BaseModel):
+    summary: str
+    selections: list[WorkflowDevelopmentTechnologyChoice] = Field(default_factory=list)
+
+
+class WorkflowDevelopmentTaskItem(BaseModel):
+    title: str
+    priority: Literal["p0", "p1", "p2", "p3"] = "p1"
+    estimate: str = ""
+    description: str = ""
+
+
+class WorkflowDevelopmentTaskPlanningOutput(BaseModel):
+    summary: str
+    tasks: list[WorkflowDevelopmentTaskItem] = Field(default_factory=list)
+    schedule: list[str] = Field(default_factory=list)
+
+
+class WorkflowDevelopmentImplementationOutput(BaseModel):
+    summary: str
+    completed_items: list[str] = Field(default_factory=list)
+    changed_modules: list[str] = Field(default_factory=list)
+    notable_decisions: list[str] = Field(default_factory=list)
+
+
+class WorkflowDevelopmentTestingOutput(BaseModel):
+    summary: str
+    test_cases: list[str] = Field(default_factory=list)
+    test_results: list[str] = Field(default_factory=list)
+    validation_status: Literal["passed", "partial", "failed"] = "partial"
+    remaining_gaps: list[str] = Field(default_factory=list)
+
+
+class WorkflowDevelopmentOptimizationOutput(BaseModel):
+    summary: str
+    improvements: list[str] = Field(default_factory=list)
+    follow_up_todos: list[str] = Field(default_factory=list)
+    known_limits: list[str] = Field(default_factory=list)
+
+
+class WorkflowDevelopmentExecutionReportPayload(BaseModel):
+    task_name: str
+    problem_definition: str
+    requirements_analysis: list[str] = Field(default_factory=list)
+    solution_design: list[str] = Field(default_factory=list)
+    technology_selection: list[WorkflowDevelopmentTechnologyChoice] = Field(default_factory=list)
+    task_breakdown_schedule: list[WorkflowDevelopmentTaskItem] = Field(default_factory=list)
+    development_results: list[str] = Field(default_factory=list)
+    test_results: list[str] = Field(default_factory=list)
+    risks_and_todos: list[str] = Field(default_factory=list)
+    final_summary: str
+
+
 class WorkflowStageRun(BaseModel):
     # 每個階段卡片都直接綁定這個模型，讓 agent / progress / input / output 一次到位。
     id: str
@@ -382,6 +479,7 @@ class WorkflowRunResponse(BaseModel):
     final_ingest_result: Optional[WorkflowWebSearchIngestOutput] = None
     final_news_brief: Optional[WorkflowNewsBriefPayload] = None
     final_system_inspection: Optional[WorkflowSystemInspectionReportPayload] = None
+    final_development_report: Optional[WorkflowDevelopmentExecutionReportPayload] = None
     error_message: Optional[str] = None
     stages: list[WorkflowStageRun] = Field(default_factory=list)
     events: list[WorkflowEvent] = Field(default_factory=list)
