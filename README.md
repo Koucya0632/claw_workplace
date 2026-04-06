@@ -241,3 +241,126 @@ System Inspection 的報告推送也可切換 Telegram 或 Discord；Telegram �
 - 是否建議升級
 - 先修什麼
 - 哪些結論仍需驗證
+
+## support-agent 知識接入與沉澱
+
+`support-agent` 現在除了查既有 `project_search` / `project_document` 索引外，也可以走一條新的外部知識接入鏈路：
+
+`搜尋 -> 篩選 -> 下載/提取 -> 清洗 -> 分類 -> 入庫 -> 索引 -> 更新`
+
+第一版重點：
+
+- 使用外網搜尋或指定 URL 收集候選資料
+- 抓取 HTML / PDF / 可下載文字內容
+- 依可信度、相關性、重複性決定是否入庫
+- 直接沉澱到既有 `documents + document_chunks + FTS`，不另建第二套知識庫
+- 為文件補上 `source_url / canonical_url / published_at / business_type / topic_tags / credibility_tier`
+- 支援版本追蹤與更新鏈
+
+### 新增 API
+
+- `POST /api/v1/knowledge/ingest`
+  啟動一次外部知識接入
+- `GET /api/v1/knowledge/ingestion-runs`
+  查看接入批次與每筆候選處理結果
+- `GET /api/v1/knowledge/documents/{id}/versions`
+  查看文件版本鏈
+- `POST /api/v1/sources`
+  建立通用 source，現在可建立 `local / web_page / url_list / rss_feed`
+- `POST /api/v1/sources/{id}/scan`
+  `local` 會走原本掃描流程；`web_page / url_list / rss_feed` 會走 knowledge ingest refresh
+
+### 接入 payload 範例
+
+```json
+{
+  "topic": "OpenClaw 安全更新",
+  "query": "OpenClaw security update",
+  "source_name": "OpenClaw Security Feed",
+  "source_type": "web_page",
+  "urls": ["https://docs.openclaw.ai/security/update-1"],
+  "keywords": ["security", "workflow"],
+  "business_type": "security"
+}
+```
+
+### 新增環境變數
+
+```bash
+OPENCLAW_KNOWLEDGE_DISCOVERY_TIMEOUT_SECONDS=15
+OPENCLAW_KNOWLEDGE_FETCH_TIMEOUT_SECONDS=20
+OPENCLAW_KNOWLEDGE_DEFAULT_LIMIT=5
+```
+
+這三個值分別控制：
+
+- 外網候選搜尋逾時
+- 網頁 / 文件抓取逾時
+- 單次知識接入預設候選上限
+
+### main -> support-agent 固定交接契約
+
+現在建議 `main` 對 `support-agent` 使用固定 handoff contract，避免每次臨時拼 prompt。
+
+三種標準 intent：
+
+1. `retrieve_existing_knowledge`
+   只查既有索引與已入庫知識。
+2. `acquire_new_knowledge`
+   需要外部搜尋、篩選、接入與知識沉澱。
+3. `organize_evidence`
+   需要對現有資料做去重、整理與結構化交接。
+
+建議 handoff payload：
+
+```json
+{
+  "intent": "retrieve_existing_knowledge | acquire_new_knowledge | organize_evidence",
+  "goal": "一句話說明任務目標",
+  "user_request": "原始需求摘要",
+  "question_to_answer": "support-agent 要支撐的核心問題",
+  "constraints": {
+    "preferred_sources": [],
+    "forbidden_sources": [],
+    "time_window": null,
+    "must_include": [],
+    "must_exclude": [],
+    "business_type": null,
+    "store_if_high_value": false
+  },
+  "known_context": [],
+  "expected_output": {
+    "format": "evidence_brief | ingest_summary | organized_notes",
+    "max_items": 5
+  }
+}
+```
+
+建議回傳 payload：
+
+```json
+{
+  "summary": "一句話總結",
+  "status": "completed | partial | blocked",
+  "sources_checked": [],
+  "accepted_sources": [],
+  "rejected_sources": [],
+  "evidence": [],
+  "knowledge_actions": {
+    "created_sources": [],
+    "updated_sources": [],
+    "ingestion_runs": [],
+    "stored_documents": []
+  },
+  "gaps": [],
+  "recommended_next_step": "controller 下一步建議"
+}
+```
+
+治理原則：
+
+- `main` 只負責 intake、路由、整合與對外回覆
+- `support-agent` 主理搜尋、證據、知識接入與整理
+- 若只是查既有資料，不應自動擴大到外部接入
+- 若需要沉澱新知識，必須明確打開 `store_if_high_value`
+- 若證據不足，`support-agent` 應回 `partial` 或 `blocked`，而不是硬下結論

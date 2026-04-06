@@ -5,6 +5,7 @@ from app.repositories.database import ensure_database_ready
 from app.routers import (
     documents,
     health,
+    knowledge,
     openclaw_agents,
     openclaw_daily_news,
     openclaw_system_inspection,
@@ -43,6 +44,7 @@ def create_app() -> FastAPI:
     # 將各功能 router 掛到統一的 /api/v1 前綴下。
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(sources.router, prefix="/api/v1")
+    app.include_router(knowledge.router, prefix="/api/v1")
     app.include_router(search.router, prefix="/api/v1")
     app.include_router(documents.router, prefix="/api/v1")
     app.include_router(tasks.router, prefix="/api/v1")

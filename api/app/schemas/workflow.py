@@ -5,6 +5,8 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from app.schemas.knowledge import BusinessType
+
 
 WORKFLOW_STAGE_KEYS = ("search", "analysis", "report")
 WORKFLOW_TYPE_SEARCH_REPORT = "search_report"
@@ -36,6 +38,10 @@ class WorkflowWebSearchCreateRequest(BaseModel):
     include_project_sources: bool = False
     source_id: Optional[str] = None
     result_limit: int = Field(default=5, ge=1, le=10)
+    business_type: Optional[BusinessType] = None
+    auto_publish: bool = True
+    source_merge_hint: Optional[str] = None
+    ingest_mode: Literal["auto_store"] = "auto_store"
 
 
 class WorkflowNewsBriefCreateRequest(BaseModel):
@@ -143,9 +149,25 @@ class WorkflowWebSearchFilterOutput(BaseModel):
     # Filter 階段會把噪音來源排掉，留下真正要交給 format 階段的核心內容。
     summary: str
     kept_sources: list[WorkflowWebSearchSourceItem] = Field(default_factory=list)
+    rejected_sources: list[WorkflowWebSearchSourceItem] = Field(default_factory=list)
     discarded_count: int = 0
     extracted_points: list[str] = Field(default_factory=list)
     focus_answers: list[str] = Field(default_factory=list)
+    ingest_reason: str = ""
+    suggested_business_type: Optional[BusinessType] = None
+    suggested_topic_tags: list[str] = Field(default_factory=list)
+
+
+class WorkflowWebSearchIngestOutput(BaseModel):
+    source_resolution: Literal["explicit_source", "merged", "created"]
+    created_source_id: Optional[str] = None
+    merged_source_id: Optional[str] = None
+    ingestion_run_id: Optional[str] = None
+    stored_documents: list[str] = Field(default_factory=list)
+    updated_documents: list[str] = Field(default_factory=list)
+    rejected_documents: list[str] = Field(default_factory=list)
+    ingest_summary: str
+    source_name: Optional[str] = None
 
 
 class WorkflowWebSearchResult(BaseModel):
@@ -157,6 +179,8 @@ class WorkflowWebSearchResult(BaseModel):
     focus_answers: list[str] = Field(default_factory=list)
     included_sources: list[WorkflowWebSearchSourceItem] = Field(default_factory=list)
     applied_filters: list[str] = Field(default_factory=list)
+    ingestion_run_id: Optional[str] = None
+    ingest_result: Optional[WorkflowWebSearchIngestOutput] = None
     structured_output: str
     markdown: str
 
@@ -354,6 +378,8 @@ class WorkflowRunResponse(BaseModel):
     input_payload: dict[str, Any] = Field(default_factory=dict)
     final_report: Optional[WorkflowReportPayload] = None
     final_web_result: Optional[WorkflowWebSearchResult] = None
+    final_ingestion_run_id: Optional[str] = None
+    final_ingest_result: Optional[WorkflowWebSearchIngestOutput] = None
     final_news_brief: Optional[WorkflowNewsBriefPayload] = None
     final_system_inspection: Optional[WorkflowSystemInspectionReportPayload] = None
     error_message: Optional[str] = None

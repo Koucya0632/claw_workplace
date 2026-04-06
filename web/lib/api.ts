@@ -1,5 +1,8 @@
 import type {
   DocumentSummary,
+  DocumentVersionSummary,
+  KnowledgeIngestRequest,
+  KnowledgeIngestionRunResponse,
   OpenClawAgentSummary,
   OpenClawAgentCapabilityRecord,
   OpenClawApiResponse,
@@ -20,7 +23,11 @@ import type {
   ScanSourceResponse,
   SearchRequest,
   SearchResponse,
+  SourceDetailResponse,
+  SourceMetricsResponse,
   SourceResponse,
+  SourceSyncEventResponse,
+  SourceUpdateRequest,
   TaskStatusResponse,
   WebSearchOutputFormat,
   WorkflowNewsBriefCreateRequest,
@@ -48,6 +55,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(errorPayload?.detail ?? `API request failed: ${response.status}`);
   }
 
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
   return (await response.json()) as T;
 }
 
@@ -62,8 +73,43 @@ async function requestOpenClaw<T>(path: string, init?: RequestInit): Promise<T> 
   return payload.data;
 }
 
-export async function fetchSources() {
-  return request<SourceResponse[]>("/sources");
+export async function fetchSources(params?: {
+  q?: string;
+  status?: string;
+  type?: string;
+  sort?: "updated_at" | "last_sync" | "name" | "document_count" | "status";
+  order?: "asc" | "desc";
+}) {
+  const searchParams = new URLSearchParams();
+  if (params?.q) {
+    searchParams.set("q", params.q);
+  }
+  if (params?.status) {
+    searchParams.set("status", params.status);
+  }
+  if (params?.type) {
+    searchParams.set("type", params.type);
+  }
+  if (params?.sort) {
+    searchParams.set("sort", params.sort);
+  }
+  if (params?.order) {
+    searchParams.set("order", params.order);
+  }
+  const suffix = searchParams.size > 0 ? `?${searchParams.toString()}` : "";
+  return request<SourceResponse[]>(`/sources${suffix}`);
+}
+
+export async function fetchSourceMetrics() {
+  return request<SourceMetricsResponse>("/sources/summary");
+}
+
+export async function fetchSourceDetail(sourceId: string) {
+  return request<SourceDetailResponse>(`/sources/${sourceId}`);
+}
+
+export async function fetchSourceActivity(sourceId: string) {
+  return request<SourceSyncEventResponse[]>(`/sources/${sourceId}/activity`);
 }
 
 export async function createLocalSource(name: string, path: string) {
@@ -79,9 +125,54 @@ export async function createLocalSource(name: string, path: string) {
   });
 }
 
+export async function createSource(payload: {
+  name: string;
+  type: "local" | "google_drive" | "notion" | "web_page" | "rss_feed" | "url_list";
+  config: {
+    path?: string | null;
+    url?: string | null;
+    urls?: string[];
+    root_page_id?: string | null;
+    database_id?: string | null;
+    workspace_name?: string | null;
+    extra?: Record<string, unknown>;
+  };
+  role_hint?: string;
+}) {
+  return request<SourceResponse>("/sources", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export async function scanSource(sourceId: string) {
   return request<ScanSourceResponse>(`/sources/${sourceId}/scan`, {
     method: "POST"
+  });
+}
+
+export async function updateSource(sourceId: string, payload: SourceUpdateRequest) {
+  return request<SourceResponse>(`/sources/${sourceId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function enableSource(sourceId: string) {
+  return request<SourceResponse>(`/sources/${sourceId}/enable`, {
+    method: "POST"
+  });
+}
+
+export async function disableSource(sourceId: string) {
+  return request<SourceResponse>(`/sources/${sourceId}/disable`, {
+    method: "POST"
+  });
+}
+
+export async function deleteSource(sourceId: string) {
+  return request<void>(`/sources/${sourceId}`, {
+    method: "DELETE"
   });
 }
 
@@ -94,6 +185,29 @@ export async function searchDocuments(payload: SearchRequest) {
 
 export async function fetchDocument(documentId: string) {
   return request<DocumentSummary>(`/documents/${documentId}`);
+}
+
+export async function fetchKnowledgeIngestionRuns(params?: { sourceId?: string; limit?: number }) {
+  const searchParams = new URLSearchParams();
+  if (params?.sourceId) {
+    searchParams.set("source_id", params.sourceId);
+  }
+  if (params?.limit) {
+    searchParams.set("limit", String(params.limit));
+  }
+  const suffix = searchParams.size > 0 ? `?${searchParams.toString()}` : "";
+  return request<KnowledgeIngestionRunResponse[]>(`/knowledge/ingestion-runs${suffix}`);
+}
+
+export async function ingestKnowledge(payload: KnowledgeIngestRequest) {
+  return request<KnowledgeIngestionRunResponse>("/knowledge/ingest", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchDocumentVersions(documentId: string) {
+  return request<DocumentVersionSummary[]>(`/knowledge/documents/${documentId}/versions`);
 }
 
 export async function createSummaryTask(documentId: string) {

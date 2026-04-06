@@ -1,7 +1,9 @@
-export type SourceType = "local" | "google_drive" | "notion";
+export type SourceType = "local" | "google_drive" | "notion" | "web_page" | "rss_feed" | "url_list";
 
 export interface SourceConfig {
   path?: string | null;
+  url?: string | null;
+  urls?: string[];
   root_page_id?: string | null;
   database_id?: string | null;
   workspace_name?: string | null;
@@ -13,10 +15,56 @@ export interface SourceResponse {
   name: string;
   type: SourceType;
   status: string;
+  is_enabled: boolean;
   config: SourceConfig;
+  document_count: number;
+  last_sync_status: string;
+  last_sync_error?: string | null;
+  last_successful_sync_at?: string | null;
+  last_failed_sync_at?: string | null;
+  last_sync_result: SourceSyncResult;
   last_scan_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface SourceSyncResult {
+  scanned_count: number;
+  skipped_count: number;
+  error_count: number;
+}
+
+export interface SourceSyncEventResponse {
+  id: string;
+  source_id: string;
+  status: string;
+  message: string;
+  scanned_count: number;
+  skipped_count: number;
+  error_count: number;
+  created_at: string;
+}
+
+export interface SourceDetailResponse extends SourceResponse {
+  version_count: number;
+  recent_activity: SourceSyncEventResponse[];
+}
+
+export interface SourceMetricsResponse {
+  total_sources: number;
+  healthy_sources: number;
+  warning_sources: number;
+  failed_sources: number;
+  syncing_sources: number;
+  disabled_sources: number;
+  recently_updated_sources: number;
+  recent_sync_failures: number;
+}
+
+export interface SourceUpdateRequest {
+  name?: string;
+  config?: SourceConfig;
+  is_enabled?: boolean;
 }
 
 export interface ScanSourceResponse {
@@ -44,6 +92,12 @@ export interface SearchResultItem {
   snippet: string;
   matched_on: string;
   modified_at: string;
+  source_url?: string | null;
+  canonical_url?: string | null;
+  published_at?: string | null;
+  business_type?: string | null;
+  topic_tags?: string[];
+  credibility_tier?: string | null;
 }
 
 export interface SearchResponse {
@@ -62,6 +116,82 @@ export interface DocumentSummary {
   modified_at: string;
   content_preview: string;
   extracted_text: string;
+  source_url?: string | null;
+  canonical_url?: string | null;
+  published_at?: string | null;
+  language?: string | null;
+  status?: string | null;
+  business_type?: string | null;
+  topic_tags?: string[];
+  credibility_tier?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface DocumentVersionSummary {
+  id: string;
+  filename: string;
+  source_url?: string | null;
+  canonical_url?: string | null;
+  checksum: string;
+  version_group_id?: string | null;
+  version_number: number;
+  supersedes_document_id?: string | null;
+  status?: string | null;
+  indexed_at: string;
+  published_at?: string | null;
+}
+
+export type KnowledgeSourceType = "web_page" | "url_list" | "rss_feed";
+export type BusinessType = "support" | "product" | "engineering" | "compliance" | "operations" | "market" | "finance" | "security";
+
+export interface KnowledgeIngestRequest {
+  topic: string;
+  query?: string;
+  source_id?: string;
+  source_name?: string;
+  source_type?: KnowledgeSourceType;
+  urls: string[];
+  domains: string[];
+  keywords: string[];
+  must_include: string[];
+  must_exclude: string[];
+  business_type?: BusinessType | null;
+  time_window_days?: number | null;
+  limit: number;
+  auto_publish: boolean;
+}
+
+export interface KnowledgeIngestionItemResponse {
+  id: string;
+  candidate_url: string;
+  normalized_url?: string | null;
+  title: string;
+  status: string;
+  reject_reason?: string | null;
+  document_id?: string | null;
+  trust_score?: number | null;
+  relevance_score?: number | null;
+  duplicate_score?: number | null;
+  source_domain: string;
+  created_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface KnowledgeIngestionRunResponse {
+  id: string;
+  source_id: string;
+  source_name: string;
+  topic: string;
+  query: string;
+  status: string;
+  total_candidates: number;
+  accepted_count: number;
+  updated_count: number;
+  rejected_count: number;
+  created_at: string;
+  completed_at?: string | null;
+  items: KnowledgeIngestionItemResponse[];
+  metadata: Record<string, unknown>;
 }
 
 export interface RoleStatusEvent {
@@ -364,8 +494,22 @@ export interface WorkflowWebSearchResult {
   focus_answers: string[];
   included_sources: WorkflowWebSearchSourceItem[];
   applied_filters: string[];
+  ingestion_run_id?: string | null;
+  ingest_result?: WorkflowWebSearchIngestOutput | null;
   structured_output: string;
   markdown: string;
+}
+
+export interface WorkflowWebSearchIngestOutput {
+  source_resolution: "explicit_source" | "merged" | "created";
+  created_source_id?: string | null;
+  merged_source_id?: string | null;
+  ingestion_run_id?: string | null;
+  stored_documents: string[];
+  updated_documents: string[];
+  rejected_documents: string[];
+  ingest_summary: string;
+  source_name?: string | null;
 }
 
 export interface WorkflowNewsSourceItem {
@@ -508,6 +652,8 @@ export interface WorkflowRunResponse {
   input_payload: Record<string, unknown>;
   final_report?: WorkflowReportPayload | null;
   final_web_result?: WorkflowWebSearchResult | null;
+  final_ingestion_run_id?: string | null;
+  final_ingest_result?: WorkflowWebSearchIngestOutput | null;
   final_news_brief?: WorkflowNewsBriefPayload | null;
   final_system_inspection?: WorkflowSystemInspectionReportPayload | null;
   error_message?: string | null;
@@ -529,6 +675,10 @@ export interface WorkflowWebSearchCreateRequest {
   focus_points: string[];
   output_format: WebSearchOutputFormat;
   include_project_sources: boolean;
+  business_type?: BusinessType | null;
+  auto_publish: boolean;
+  source_merge_hint?: string;
+  ingest_mode: "auto_store";
   source_id?: string;
   result_limit: number;
 }

@@ -25,8 +25,20 @@ describe("SourceStatusBoard", () => {
             id: "src_1",
             name: "本地來源",
             type: "local",
-            status: "ready",
+            status: "active",
+            is_enabled: true,
             config: { path: "/tmp/source" },
+            document_count: 0,
+            last_sync_status: "never_scanned",
+            last_sync_error: null,
+            last_successful_sync_at: null,
+            last_failed_sync_at: null,
+            last_sync_result: {
+              scanned_count: 0,
+              skipped_count: 0,
+              error_count: 0
+            },
+            last_scan_at: null,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString()
           }

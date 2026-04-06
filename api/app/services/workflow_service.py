@@ -15,6 +15,7 @@ from app.repositories.openclaw_operation_log_repository import OpenClawOperation
 from app.repositories.openclaw_system_inspection_config_repository import OpenClawSystemInspectionConfigRepository
 from app.repositories.openclaw_workflow_config_repository import OpenClawWorkflowConfigRepository
 from app.repositories.workflow_repository import WorkflowRepository
+from app.schemas.knowledge import KnowledgeIngestRequest
 from app.schemas.openclaw_daily_news import OpenClawDailyNewsConfigRequest, OpenClawDailyNewsConfigResponse
 from app.schemas.openclaw_system_inspection import (
     OpenClawSystemInspectionConfigRequest,
@@ -49,11 +50,13 @@ from app.schemas.workflow import (
     WorkflowSystemInspectionVersionOutput,
     WorkflowWebSearchCreateRequest,
     WorkflowWebSearchFilterOutput,
+    WorkflowWebSearchIngestOutput,
     WorkflowWebSearchResult,
     WorkflowWebSearchSearchOutput,
     WorkflowWebSearchSourceItem,
     WorkflowWebSearchUnderstandOutput,
 )
+from app.services.knowledge_ingestion_service import KnowledgeIngestionService
 from app.services.openclaw_cli_adapter import OpenClawCliAdapter
 from app.services.openclaw_errors import OpenClawServiceError
 from app.services.openclaw_hook_client import OpenClawHookClient
@@ -69,6 +72,7 @@ ANALYSIS_STAGE_KEY = "analysis"
 REPORT_STAGE_KEY = "report"
 UNDERSTAND_STAGE_KEY = "understand"
 FILTER_STAGE_KEY = "filter"
+INGEST_STAGE_KEY = "ingest"
 FORMAT_STAGE_KEY = "format"
 MONITOR_STAGE_KEY = "monitor"
 DEDUPE_STAGE_KEY = "dedupe"
@@ -80,7 +84,7 @@ LOG_REVIEW_STAGE_KEY = "log_review"
 RISK_ASSESSMENT_STAGE_KEY = "risk_assessment"
 
 SEARCH_REPORT_STAGE_SEQUENCE = (SEARCH_STAGE_KEY, ANALYSIS_STAGE_KEY, REPORT_STAGE_KEY)
-WEB_SEARCH_STAGE_SEQUENCE = (UNDERSTAND_STAGE_KEY, SEARCH_STAGE_KEY, FILTER_STAGE_KEY, FORMAT_STAGE_KEY)
+WEB_SEARCH_STAGE_SEQUENCE = (UNDERSTAND_STAGE_KEY, SEARCH_STAGE_KEY, FILTER_STAGE_KEY, INGEST_STAGE_KEY, FORMAT_STAGE_KEY)
 NEWS_BRIEF_STAGE_SEQUENCE = (MONITOR_STAGE_KEY, SEARCH_STAGE_KEY, DEDUPE_STAGE_KEY, RANK_STAGE_KEY, BRIEF_STAGE_KEY)
 SYSTEM_INSPECTION_STAGE_SEQUENCE = (SNAPSHOT_STAGE_KEY, VERSION_CHECK_STAGE_KEY, LOG_REVIEW_STAGE_KEY, RISK_ASSESSMENT_STAGE_KEY, REPORT_STAGE_KEY)
 
@@ -104,19 +108,22 @@ WEB_SEARCH_RUN_PROGRESS_START = {
     UNDERSTAND_STAGE_KEY: 5,
     SEARCH_STAGE_KEY: 25,
     FILTER_STAGE_KEY: 55,
-    FORMAT_STAGE_KEY: 82,
+    INGEST_STAGE_KEY: 75,
+    FORMAT_STAGE_KEY: 88,
 }
 WEB_SEARCH_RUN_PROGRESS_DONE = {
     UNDERSTAND_STAGE_KEY: 20,
     SEARCH_STAGE_KEY: 50,
-    FILTER_STAGE_KEY: 78,
+    FILTER_STAGE_KEY: 70,
+    INGEST_STAGE_KEY: 86,
     FORMAT_STAGE_KEY: 100,
 }
 WEB_SEARCH_STAGE_RUNNING_PROGRESS = {
     UNDERSTAND_STAGE_KEY: 25,
     SEARCH_STAGE_KEY: 45,
-    FILTER_STAGE_KEY: 72,
-    FORMAT_STAGE_KEY: 92,
+    FILTER_STAGE_KEY: 66,
+    INGEST_STAGE_KEY: 82,
+    FORMAT_STAGE_KEY: 94,
 }
 
 NEWS_BRIEF_RUN_PROGRESS_START = {
@@ -408,6 +415,7 @@ class SearchReportWorkflowService:
         system_inspection_repository: Optional[OpenClawSystemInspectionConfigRepository] = None,
         capability_repository: Optional[OpenClawAgentCapabilityRepository] = None,
         operation_log_repository: Optional[OpenClawOperationLogRepository] = None,
+        knowledge_ingestion_service: Optional[KnowledgeIngestionService] = None,
         hook_client: Optional[OpenClawHookClient] = None,
         telegram_delivery_client: Optional[TelegramDeliveryClient] = None,
         discord_delivery_client: Optional[DiscordDeliveryClient] = None,
@@ -429,6 +437,7 @@ class SearchReportWorkflowService:
         self.system_inspection_repository = system_inspection_repository or OpenClawSystemInspectionConfigRepository()
         self.capability_repository = capability_repository or OpenClawAgentCapabilityRepository()
         self.operation_log_repository = operation_log_repository or OpenClawOperationLogRepository()
+        self.knowledge_ingestion_service = knowledge_ingestion_service or KnowledgeIngestionService()
         self.hook_client = hook_client or OpenClawHookClient()
         self.telegram_delivery_client = telegram_delivery_client or TelegramDeliveryClient.from_daily_news_settings()
         self.discord_delivery_client = discord_delivery_client or DiscordDeliveryClient.from_daily_news_settings()
@@ -501,6 +510,7 @@ class SearchReportWorkflowService:
                 {"stage_key": UNDERSTAND_STAGE_KEY, "agent_id": stage_agents[UNDERSTAND_STAGE_KEY]},
                 {"stage_key": SEARCH_STAGE_KEY, "agent_id": stage_agents[SEARCH_STAGE_KEY]},
                 {"stage_key": FILTER_STAGE_KEY, "agent_id": stage_agents[FILTER_STAGE_KEY]},
+                {"stage_key": INGEST_STAGE_KEY, "agent_id": stage_agents[INGEST_STAGE_KEY]},
                 {"stage_key": FORMAT_STAGE_KEY, "agent_id": stage_agents[FORMAT_STAGE_KEY]},
             ],
         )
@@ -798,11 +808,18 @@ class SearchReportWorkflowService:
             understand_output = self._run_web_understand_stage(run, stage_agents[UNDERSTAND_STAGE_KEY])
             search_output = self._run_web_search_stage(self.workflow_repository.get_run(run.id), stage_agents[SEARCH_STAGE_KEY], understand_output)
             filter_output = self._run_web_filter_stage(self.workflow_repository.get_run(run.id), stage_agents[FILTER_STAGE_KEY], understand_output, search_output)
+            ingest_output = self._run_web_ingest_stage(
+                self.workflow_repository.get_run(run.id),
+                stage_agents[INGEST_STAGE_KEY],
+                understand_output,
+                filter_output,
+            )
             formatted_output = self._run_web_format_stage(
                 self.workflow_repository.get_run(run.id),
                 stage_agents[FORMAT_STAGE_KEY],
                 understand_output,
                 filter_output,
+                ingest_output,
             )
 
             self.workflow_repository.update_run_status(
@@ -1386,10 +1403,12 @@ class SearchReportWorkflowService:
         agent_id: str,
         understand_output: WorkflowWebSearchUnderstandOutput,
         filter_output: WorkflowWebSearchFilterOutput,
+        ingest_output: WorkflowWebSearchIngestOutput,
     ) -> WorkflowWebSearchResult:
         input_payload = {
             "understand_output": understand_output.model_dump(),
             "filter_output": filter_output.model_dump(),
+            "ingest_output": ingest_output.model_dump(),
         }
         self._mark_stage_running(
             run_id=run.id,
@@ -1414,10 +1433,16 @@ class SearchReportWorkflowService:
                 instance_id=run.instance_id,
                 agent_id=agent_id,
                 session_key=f"{run.id}-{FORMAT_STAGE_KEY}",
-                message=_build_web_format_prompt(run.input_payload, understand_output, filter_output),
+                message=_build_web_format_prompt(run.input_payload, understand_output, filter_output, ingest_output),
                 metadata={"workflow_run_id": run.id, "stage_key": FORMAT_STAGE_KEY, "workflow_type": run.workflow_type},
             )
             result_output = _parse_agent_output(response_payload, WorkflowWebSearchResult, "Web Search 格式化階段")
+            result_output = result_output.model_copy(
+                update={
+                    "ingestion_run_id": ingest_output.ingestion_run_id,
+                    "ingest_result": ingest_output,
+                }
+            )
             self.workflow_repository.update_stage(
                 run_id=run.id,
                 stage_key=FORMAT_STAGE_KEY,
@@ -1438,6 +1463,130 @@ class SearchReportWorkflowService:
             return result_output
         except OpenClawServiceError as error:
             self._mark_stage_failed(run_id=run.id, stage_key=FORMAT_STAGE_KEY, agent_id=agent_id, error=error)
+            raise
+
+    def _run_web_ingest_stage(
+        self,
+        run: WorkflowRunResponse,
+        agent_id: str,
+        understand_output: WorkflowWebSearchUnderstandOutput,
+        filter_output: WorkflowWebSearchFilterOutput,
+    ) -> WorkflowWebSearchIngestOutput:
+        kept_urls = [item.url for item in filter_output.kept_sources if item.url]
+        if not kept_urls:
+            ingest_output = WorkflowWebSearchIngestOutput(
+                source_resolution="merged",
+                ingest_summary="本次保留來源僅含既有專案內容或無可入庫 URL，因此未新增知識庫文件。",
+                source_name=None,
+            )
+            self.workflow_repository.update_stage(
+                run_id=run.id,
+                stage_key=INGEST_STAGE_KEY,
+                status="completed",
+                progress_percent=100,
+                output_payload=ingest_output.model_dump(),
+                completed_at=utc_now_iso(),
+            )
+            self.workflow_repository.update_run_status(
+                run_id=run.id,
+                status="running",
+                current_stage=INGEST_STAGE_KEY,
+                active_agent_id=agent_id,
+                overall_progress_percent=WEB_SEARCH_RUN_PROGRESS_DONE[INGEST_STAGE_KEY],
+                error_message=None,
+            )
+            self.workflow_repository.add_event(
+                run_id=run.id,
+                stage_key=INGEST_STAGE_KEY,
+                agent_id=agent_id,
+                status="completed",
+                progress_percent=WEB_SEARCH_RUN_PROGRESS_DONE[INGEST_STAGE_KEY],
+                message="本次沒有新的外部來源需要入庫，已保留搜尋與過濾結果。",
+                payload={"ingestion_run_id": None, "stored_count": 0, "updated_count": 0, "rejected_count": 0},
+            )
+            return ingest_output
+        input_payload = {
+            "topic": understand_output.normalized_topic,
+            "kept_sources": [item.model_dump() for item in filter_output.kept_sources],
+            "suggested_business_type": filter_output.suggested_business_type,
+            "source_merge_hint": run.input_payload.get("source_merge_hint"),
+        }
+        self._mark_stage_running(
+            run_id=run.id,
+            stage_key=INGEST_STAGE_KEY,
+            agent_id=agent_id,
+            input_payload=input_payload,
+            run_progress=WEB_SEARCH_RUN_PROGRESS_START[INGEST_STAGE_KEY],
+            stage_progress=WEB_SEARCH_STAGE_RUNNING_PROGRESS[INGEST_STAGE_KEY],
+            message="正在把高價值搜尋結果寫入知識庫...",
+        )
+        try:
+            ingest_request = KnowledgeIngestRequest(
+                topic=understand_output.normalized_topic,
+                query=str(run.input_payload.get("topic") or understand_output.normalized_topic),
+                source_id=None,
+                source_name=(str(run.input_payload.get("source_merge_hint") or "").strip() or f"Web Search: {understand_output.normalized_topic}"),
+                source_type="url_list" if len(kept_urls) > 1 else "web_page",
+                urls=kept_urls,
+                domains=list(dict.fromkeys([item.domain for item in filter_output.kept_sources if item.domain])),
+                keywords=understand_output.keywords,
+                must_include=understand_output.must_include,
+                must_exclude=understand_output.must_exclude,
+                business_type=(run.input_payload.get("business_type") or filter_output.suggested_business_type),
+                limit=min(len(kept_urls), int(run.input_payload.get("result_limit") or 5)) or int(run.input_payload.get("result_limit") or 5),
+                auto_publish=bool(run.input_payload.get("auto_publish", True)),
+            )
+            ingestion_run = self.knowledge_ingestion_service.ingest(ingest_request)
+            metadata = ingestion_run.metadata or {}
+            source_resolution = str(metadata.get("source_resolution") or "created")
+            ingest_output = WorkflowWebSearchIngestOutput(
+                source_resolution=source_resolution if source_resolution in {"explicit_source", "merged", "created"} else "created",
+                created_source_id=metadata.get("created_source_id"),
+                merged_source_id=metadata.get("merged_source_id"),
+                ingestion_run_id=ingestion_run.id,
+                stored_documents=[item.document_id for item in ingestion_run.items if item.status == "accepted" and item.document_id],
+                updated_documents=[item.document_id for item in ingestion_run.items if item.status == "updated" and item.document_id],
+                rejected_documents=[item.candidate_url for item in ingestion_run.items if item.status == "rejected"],
+                ingest_summary=(
+                    f"已將 {ingestion_run.accepted_count} 筆新文件、{ingestion_run.updated_count} 筆更新寫入知識庫，"
+                    f"並拒收 {ingestion_run.rejected_count} 筆低價值來源。"
+                ),
+                source_name=ingestion_run.source_name,
+            )
+            self.workflow_repository.update_stage(
+                run_id=run.id,
+                stage_key=INGEST_STAGE_KEY,
+                status="completed",
+                progress_percent=100,
+                output_payload=ingest_output.model_dump(),
+                completed_at=utc_now_iso(),
+            )
+            self.workflow_repository.update_run_status(
+                run_id=run.id,
+                status="running",
+                current_stage=INGEST_STAGE_KEY,
+                active_agent_id=agent_id,
+                overall_progress_percent=WEB_SEARCH_RUN_PROGRESS_DONE[INGEST_STAGE_KEY],
+                error_message=None,
+            )
+            self.workflow_repository.add_event(
+                run_id=run.id,
+                stage_key=INGEST_STAGE_KEY,
+                agent_id=agent_id,
+                status="completed",
+                progress_percent=WEB_SEARCH_RUN_PROGRESS_DONE[INGEST_STAGE_KEY],
+                message="高價值 Web Search 來源已完成入庫與來源合併。",
+                payload={
+                    "ingestion_run_id": ingest_output.ingestion_run_id,
+                    "source_resolution": ingest_output.source_resolution,
+                    "stored_count": len(ingest_output.stored_documents),
+                    "updated_count": len(ingest_output.updated_documents),
+                    "rejected_count": len(ingest_output.rejected_documents),
+                },
+            )
+            return ingest_output
+        except OpenClawServiceError as error:
+            self._mark_stage_failed(run_id=run.id, stage_key=INGEST_STAGE_KEY, agent_id=agent_id, error=error)
             raise
 
     def _run_news_monitor_stage(
@@ -2659,7 +2808,7 @@ def _build_report_prompt(*, query: str, analysis_output: dict[str, Any]) -> str:
 
 def _build_web_understand_prompt(request_payload: dict[str, Any]) -> str:
     return (
-        "你是 Web Search 的理解階段代理。請先理解使用者的搜尋目標與條件，之後其他階段會承接你的輸出。\n"
+        "你是 Web Search + Knowledge Ingest 的理解階段代理。請先理解使用者的搜尋目標、入庫意圖與條件，之後其他階段會承接你的輸出。\n"
         f"原始請求：{json.dumps(request_payload, ensure_ascii=False)}\n"
         "只輸出 JSON，不要使用 Markdown。\n"
         "JSON schema:\n"
@@ -2683,7 +2832,7 @@ def _build_web_understand_prompt(request_payload: dict[str, Any]) -> str:
 
 def _build_web_search_prompt(request_payload: dict[str, Any], understand_output: WorkflowWebSearchUnderstandOutput) -> str:
     return (
-        "你是 Web Search 的搜尋階段代理，必須使用 OpenClaw 內建 web_search 工具完成外網搜尋。\n"
+        "你是 Web Search + Knowledge Ingest 的搜尋階段代理，必須使用 OpenClaw 內建 web_search 工具完成外網搜尋。\n"
         "若 include_project_sources=true 且目前有 project_search / project_document，也可補充 1-2 筆專案索引結果。\n"
         f"原始請求：{json.dumps(request_payload, ensure_ascii=False)}\n"
         f"理解階段輸出：{json.dumps(understand_output.model_dump(), ensure_ascii=False)}\n"
@@ -2716,10 +2865,10 @@ def _build_web_filter_prompt(
     search_output: WorkflowWebSearchSearchOutput,
 ) -> str:
     return (
-        "你是 Web Search 的過濾階段代理。請根據 must_include、must_exclude、focus_points 與搜尋目標過濾來源。\n"
+        "你是 Web Search + Knowledge Ingest 的過濾階段代理。請根據 must_include、must_exclude、focus_points 與搜尋目標過濾來源，並指出哪些來源值得入庫。\n"
         f"理解階段輸出：{json.dumps(understand_output.model_dump(), ensure_ascii=False)}\n"
         f"搜尋階段輸出：{json.dumps(search_output.model_dump(), ensure_ascii=False)}\n"
-        "請只留下真正相關的來源與資訊，並只輸出 JSON。\n"
+        "請只留下真正相關且值得沉澱的來源與資訊，並只輸出 JSON。\n"
         "JSON schema:\n"
         "{\n"
         '  "summary": "一句話說明過濾後結果",\n'
@@ -2737,9 +2886,26 @@ def _build_web_filter_prompt(
         '      "relative_path": "..."\n'
         "    }\n"
         "  ],\n"
+        '  "rejected_sources": [\n'
+        '    {\n'
+        '      "title": "...",\n'
+        '      "source_type": "web|project",\n'
+        '      "snippet": "...",\n'
+        '      "reason": "...",\n'
+        '      "matched_keywords": ["..."],\n'
+        '      "url": "https://...",\n'
+        '      "domain": "example.com",\n'
+        '      "source_name": "...",\n'
+        '      "document_id": "...",\n'
+        '      "relative_path": "..."\n'
+        "    }\n"
+        "  ],\n"
         '  "discarded_count": 0,\n'
         '  "extracted_points": ["..."],\n'
-        '  "focus_answers": ["..."]\n'
+        '  "focus_answers": ["..."],\n'
+        '  "ingest_reason": "一句話說明為何這些來源值得入庫",\n'
+        '  "suggested_business_type": "support|product|engineering|compliance|operations|market|finance|security|null",\n'
+        '  "suggested_topic_tags": ["..."]\n'
         "}\n"
         "不要輸出額外說明。"
     )
@@ -2749,12 +2915,14 @@ def _build_web_format_prompt(
     request_payload: dict[str, Any],
     understand_output: WorkflowWebSearchUnderstandOutput,
     filter_output: WorkflowWebSearchFilterOutput,
+    ingest_output: WorkflowWebSearchIngestOutput,
 ) -> str:
     return (
-        "你是 Web Search 的格式化階段代理。請把已過濾的結果轉成使用者指定格式，並保留清楚來源。\n"
+        "你是 Web Search + Knowledge Ingest 的格式化階段代理。請把已過濾的結果與入庫摘要整合成使用者指定格式，並保留清楚來源。\n"
         f"原始請求：{json.dumps(request_payload, ensure_ascii=False)}\n"
         f"理解階段輸出：{json.dumps(understand_output.model_dump(), ensure_ascii=False)}\n"
         f"過濾階段輸出：{json.dumps(filter_output.model_dump(), ensure_ascii=False)}\n"
+        f"入庫階段輸出：{json.dumps(ingest_output.model_dump(), ensure_ascii=False)}\n"
         "只輸出 JSON。\n"
         "JSON schema:\n"
         "{\n"
@@ -2778,6 +2946,18 @@ def _build_web_format_prompt(
         "    }\n"
         "  ],\n"
         '  "applied_filters": ["..."],\n'
+        '  "ingestion_run_id": "krun_...",\n'
+        '  "ingest_result": {\n'
+        '    "source_resolution": "explicit_source|merged|created",\n'
+        '    "created_source_id": "...",\n'
+        '    "merged_source_id": "...",\n'
+        '    "ingestion_run_id": "krun_...",\n'
+        '    "stored_documents": ["doc_..."],\n'
+        '    "updated_documents": ["doc_..."],\n'
+        '    "rejected_documents": ["https://..."],\n'
+        '    "ingest_summary": "...",\n'
+        '    "source_name": "..."\n'
+        "  },\n"
         '  "structured_output": "依指定格式排好的主要內容",\n'
         '  "markdown": "# ..."\n'
         "}\n"
@@ -3375,6 +3555,7 @@ def _resolve_web_search_stage_agents(config: OpenClawWorkflowConfigResponse) -> 
         UNDERSTAND_STAGE_KEY: config.controller_agent_id,
         SEARCH_STAGE_KEY: _resolve_specialist_agent(config, "search_web", config.search_agent_id),
         FILTER_STAGE_KEY: _resolve_specialist_agent(config, "organizer", config.controller_agent_id),
+        INGEST_STAGE_KEY: _resolve_specialist_agent(config, "organizer", config.controller_agent_id),
         FORMAT_STAGE_KEY: _resolve_specialist_agent(config, "writer", config.report_agent_id),
     }
 

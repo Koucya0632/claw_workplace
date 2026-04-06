@@ -186,6 +186,22 @@ export function WorkflowReportPanel({
                   ))}
                 </ul>
               </article>
+              {webResult.ingest_result ? (
+                <article className="border-4 border-ink bg-white p-4">
+                  <h4 className="text-sm font-black tracking-[0.08em]">入庫摘要</h4>
+                  <p className="mt-3 text-sm leading-7">{webResult.ingest_result.ingest_summary}</p>
+                  <ul className="mt-3 space-y-2 text-sm leading-7">
+                    <li>來源處理：{webResult.ingest_result.source_resolution}</li>
+                    {webResult.ingest_result.source_name ? <li>知識來源：{webResult.ingest_result.source_name}</li> : null}
+                    {webResult.ingest_result.ingestion_run_id ? <li>Ingestion Run：{webResult.ingest_result.ingestion_run_id}</li> : null}
+                    {webResult.ingest_result.created_source_id ? <li>新建 Source：{webResult.ingest_result.created_source_id}</li> : null}
+                    {webResult.ingest_result.merged_source_id ? <li>合併 Source：{webResult.ingest_result.merged_source_id}</li> : null}
+                    <li>新增文件：{webResult.ingest_result.stored_documents.length}</li>
+                    <li>更新文件：{webResult.ingest_result.updated_documents.length}</li>
+                    <li>拒收來源：{webResult.ingest_result.rejected_documents.length}</li>
+                  </ul>
+                </article>
+              ) : null}
               <article className="border-4 border-ink bg-white p-4">
                 <h4 className="text-sm font-black tracking-[0.08em]">Markdown</h4>
                 <pre className="pixel-scrollbar mt-3 max-h-[420px] overflow-auto bg-slate-50 p-3 text-xs leading-6 whitespace-pre-wrap">

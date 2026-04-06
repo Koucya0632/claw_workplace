@@ -21,6 +21,7 @@ import {
   fetchWorkflowRuns
 } from "@/lib/api";
 import type {
+  BusinessType,
   OpenClawInstanceResponse,
   SourceResponse,
   WebSearchOutputFormat,
@@ -34,6 +35,19 @@ const WEB_OUTPUT_OPTIONS: Array<{ value: WebSearchOutputFormat; label: string }>
   { value: "table", label: "表格" },
   { value: "comparison", label: "比較" }
 ];
+
+const BUSINESS_TYPE_OPTIONS: Array<{ value: BusinessType; label: string }> = [
+  { value: "support", label: "Support" },
+  { value: "product", label: "Product" },
+  { value: "engineering", label: "Engineering" },
+  { value: "compliance", label: "Compliance" },
+  { value: "operations", label: "Operations" },
+  { value: "market", label: "Market" },
+  { value: "finance", label: "Finance" },
+  { value: "security", label: "Security" }
+];
+
+const PRIMARY_INSTANCE_ID = "oc_8b451d1865b74e8797df82aaaf1e316f";
 
 function SearchWorkflowPageContent() {
   const router = useRouter();
@@ -57,6 +71,7 @@ function SearchWorkflowPageContent() {
   const [mustExcludeText, setMustExcludeText] = useState("");
   const [focusPointsText, setFocusPointsText] = useState("");
   const [webOutputFormat, setWebOutputFormat] = useState<WebSearchOutputFormat>("summary");
+  const [businessType, setBusinessType] = useState<BusinessType | "">("");
   const [includeProjectSources, setIncludeProjectSources] = useState(false);
   const [resultLimit, setResultLimit] = useState(5);
 
@@ -73,7 +88,10 @@ function SearchWorkflowPageContent() {
         setSources(sourcePayload);
         setInstances(instancePayload);
         if (instancePayload.length > 0) {
-          setSelectedInstanceId((current) => current || instancePayload[0].id);
+          const preferredInstanceId = instancePayload.some((instance) => instance.id === PRIMARY_INSTANCE_ID)
+            ? PRIMARY_INSTANCE_ID
+            : instancePayload[0].id;
+          setSelectedInstanceId((current) => current || preferredInstanceId);
         }
         setError("");
       } catch (requestError) {
@@ -125,6 +143,7 @@ function SearchWorkflowPageContent() {
           setMustExcludeText,
           setFocusPointsText,
           setWebOutputFormat,
+          setBusinessType,
           setIncludeProjectSources,
           setResultLimit
         });
@@ -173,7 +192,7 @@ function SearchWorkflowPageContent() {
         setError("請先輸入搜尋內容 / 主題。");
         return;
       }
-      setMessage("已送出 Web Search 工作流，正在理解搜尋目標。");
+      setMessage("已送出 Web Search + Ingest 工作流，正在理解搜尋目標並準備搜尋即入庫。");
     }
 
     startTransition(async () => {
@@ -196,6 +215,10 @@ function SearchWorkflowPageContent() {
                 must_exclude: parseLineList(mustExcludeText),
                 focus_points: parseLineList(focusPointsText),
                 output_format: webOutputFormat,
+                business_type: businessType || undefined,
+                auto_publish: true,
+                source_merge_hint: webTopic.trim(),
+                ingest_mode: "auto_store",
                 include_project_sources: includeProjectSources,
                 source_id: includeProjectSources && sourceId ? sourceId : undefined,
                 result_limit: resultLimit
@@ -228,6 +251,7 @@ function SearchWorkflowPageContent() {
         setMustExcludeText,
         setFocusPointsText,
         setWebOutputFormat,
+        setBusinessType,
         setIncludeProjectSources,
         setResultLimit
       });
@@ -282,7 +306,7 @@ function SearchWorkflowPageContent() {
     setMessage(
       nextMode === "search_report"
         ? "已切回搜索-分析-報告模式。"
-        : "已切到 Web Search 模式，可自訂網址、網站、網域、關鍵字與輸出格式。"
+        : "已切到 Web Search + Ingest 模式，會搜尋高價值結果並自動沉澱入庫。"
     );
     router.replace("/search");
   }
@@ -291,7 +315,7 @@ function SearchWorkflowPageContent() {
   const activeModeDescription =
     workflowMode === "search_report"
       ? "把既有專案索引交給三個 agent 串行完成搜索、分析、報告。"
-      : "先理解外網搜尋目標，再搜尋、過濾並格式化輸出結果。";
+      : "先理解外網搜尋目標，再搜尋、過濾、入庫更新並格式化輸出結果。";
 
   return (
     <div className="grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]">
@@ -307,9 +331,9 @@ function SearchWorkflowPageContent() {
               onClick={() => handleModeChange("search_report")}
             />
             <ModeButton
-              label="Web Search"
+              label="Web Search + Ingest"
               active={workflowMode === "web_search"}
-              description="理解 / 搜尋 / 過濾 / 輸出"
+              description="理解 / 搜尋 / 過濾 / 入庫 / 輸出"
               onClick={() => handleModeChange("web_search")}
             />
           </div>
@@ -317,8 +341,11 @@ function SearchWorkflowPageContent() {
           <div className="mt-4 grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)]">
             <OpenClawInstancePicker instances={instances} value={selectedInstanceId} onChange={setSelectedInstanceId} />
             <div className="border-4 border-ink bg-white px-4 py-3 text-sm text-slate-700">
-              <p className="font-black tracking-[0.08em]">{workflowMode === "search_report" ? "Project Workflow" : "Web Search"}</p>
+              <p className="font-black tracking-[0.08em]">{workflowMode === "search_report" ? "Project Workflow" : "Web Search + Ingest"}</p>
               <p className="mt-2 leading-7">{activeModeDescription}</p>
+              {workflowMode === "web_search" ? (
+                <p className="mt-2 text-xs leading-6 text-slate-500">高價值搜尋來源會自動寫入知識庫，並優先合併到既有 source；找不到可合併來源時才會新建 source。</p>
+              ) : null}
             </div>
           </div>
 
@@ -377,6 +404,21 @@ function SearchWorkflowPageContent() {
                     </select>
                   </label>
                   <label className="space-y-2">
+                    <span className="text-[11px] font-black tracking-[0.12em] text-slate-500">業務分類</span>
+                    <select
+                      value={businessType}
+                      onChange={(event) => setBusinessType((event.target.value || "") as BusinessType | "")}
+                      className="w-full border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
+                    >
+                      <option value="">自動判斷</option>
+                      {BUSINESS_TYPE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-2">
                     <span className="text-[11px] font-black tracking-[0.12em] text-slate-500">結果筆數</span>
                     <select
                       value={String(resultLimit)}
@@ -405,7 +447,7 @@ function SearchWorkflowPageContent() {
                     disabled={!selectedInstanceId || !webTopic.trim() || isPending}
                     className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
                   >
-                    {isPending ? "啟動中..." : "啟動 Web Search"}
+                    {isPending ? "啟動中..." : "啟動 Web Search + Ingest"}
                   </button>
                 </div>
               </div>
@@ -547,11 +589,17 @@ function buildWorkflowRoles(activeRun: WorkflowRunResponse | null, workflowMode:
         quote: "我會剔除噪音、保留真正相關的來源與重點。"
       },
       {
+        name: "Ingest Stage",
+        tagline: stageAgentMap.get("ingest") ?? "待配置",
+        status: stageStatusMap.get("ingest") ?? "pending",
+        quote: "我會把高價值搜尋結果合併到既有知識 source，建立可追溯的入庫紀錄。"
+      },
+      {
         name: "Format Agent",
         tagline: stageAgentMap.get("format") ?? "待配置",
         status: stageStatusMap.get("format") ?? "pending",
-        quote: "我會把結果整理成摘要、條列、表格或比較格式。"
-      }
+        quote: "我會把搜尋結果與入庫摘要整理成摘要、條列、表格或比較格式。"
+      },
     ];
   }
 
@@ -591,6 +639,7 @@ function hydrateFormsFromRun(
     setMustExcludeText: (value: string) => void;
     setFocusPointsText: (value: string) => void;
     setWebOutputFormat: (value: WebSearchOutputFormat) => void;
+    setBusinessType: (value: BusinessType | "") => void;
     setIncludeProjectSources: (value: boolean) => void;
     setResultLimit: (value: number) => void;
   }
@@ -605,6 +654,7 @@ function hydrateFormsFromRun(
     setters.setMustExcludeText(joinList(run.input_payload.must_exclude));
     setters.setFocusPointsText(joinList(run.input_payload.focus_points));
     setters.setWebOutputFormat((run.input_payload.output_format as WebSearchOutputFormat) ?? "summary");
+    setters.setBusinessType(typeof run.input_payload.business_type === "string" ? (run.input_payload.business_type as BusinessType) : "");
     setters.setIncludeProjectSources(Boolean(run.input_payload.include_project_sources));
     setters.setResultLimit(Number(run.input_payload.result_limit ?? 5));
     setters.setSourceId(String(run.input_payload.source_id ?? ""));
@@ -613,6 +663,7 @@ function hydrateFormsFromRun(
 
   setters.setQuery(String(run.input_payload.query ?? ""));
   setters.setSourceId(String(run.input_payload.source_id ?? ""));
+  setters.setBusinessType("");
 }
 
 function parseLineList(value: string) {

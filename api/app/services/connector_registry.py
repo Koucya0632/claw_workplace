@@ -4,6 +4,9 @@ from app.connectors.base import BaseConnector
 from app.connectors.google_drive import GoogleDriveConnector
 from app.connectors.local_folder import LocalFolderConnector
 from app.connectors.notion import NotionConnector
+from app.connectors.rss_feed import RssFeedConnector
+from app.connectors.url_list import UrlListConnector
+from app.connectors.web_page import WebPageConnector
 
 
 class ConnectorRegistry:
@@ -13,6 +16,9 @@ class ConnectorRegistry:
             "local": LocalFolderConnector(),
             "google_drive": GoogleDriveConnector(),
             "notion": NotionConnector(),
+            "web_page": WebPageConnector(),
+            "rss_feed": RssFeedConnector(),
+            "url_list": UrlListConnector(),
         }
 
     def get(self, source_type: str) -> BaseConnector:
@@ -20,4 +26,3 @@ class ConnectorRegistry:
         if connector is None:
             raise KeyError(f"不支援的資料源型別：{source_type}")
         return connector
-

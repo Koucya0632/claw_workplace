@@ -791,11 +791,15 @@ def test_web_search_workflow_and_continue_to_report(client: TestClient) -> None:
     assert payload["workflow_type"] == "web_search"
     assert payload["status"] == "completed"
     assert payload["final_web_result"]["title"] == "『包』Web Search 整理"
-    assert [stage["stage_key"] for stage in payload["stages"]] == ["understand", "search", "filter", "format"]
+    assert [stage["stage_key"] for stage in payload["stages"]] == ["understand", "search", "filter", "ingest", "format"]
     assert payload["stages"][0]["agent_id"] == "main"
     assert payload["stages"][2]["agent_id"] == "organizer-agent"
+    assert payload["stages"][3]["agent_id"] == "organizer-agent"
+    assert payload["final_web_result"]["ingest_result"] is not None
+    assert payload["final_ingest_result"] is not None
     assert any(event["message"] == "正在理解搜尋目標..." for event in payload["events"])
     assert any(event["message"] == "正在過濾無關資訊..." for event in payload["events"])
+    assert any("寫入知識庫" in event["message"] or "入庫" in event["message"] for event in payload["events"])
     assert any(event["agent_id"] == "main" and "主控秘書" in event["message"] for event in payload["events"])
 
     list_response = client.get("/api/v1/workflows", params={"instanceId": instance_id, "workflowType": "web_search"})

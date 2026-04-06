@@ -6,6 +6,7 @@ import { vi } from "vitest";
 import OpenClawActionsPage from "@/app/openclaw/actions/page";
 import OpenClawAgentsPage from "@/app/openclaw/agents/page";
 import OpenClawDevicesPage from "@/app/openclaw/devices/page";
+import OpenClawKnowledgePage from "@/app/openclaw/knowledge/page";
 import OpenClawOverviewPage from "@/app/openclaw/page";
 import * as api from "@/lib/api";
 
@@ -24,6 +25,11 @@ vi.mock("@/lib/api", () => ({
   fetchOpenClawOperations: vi.fn(),
   fetchOpenClawAgents: vi.fn(),
   fetchOpenClawDevices: vi.fn(),
+  fetchSources: vi.fn(),
+  fetchKnowledgeIngestionRuns: vi.fn(),
+  fetchDocumentVersions: vi.fn(),
+  ingestKnowledge: vi.fn(),
+  scanSource: vi.fn(),
   updateOpenClawAgentSearchCapability: vi.fn(),
   runOpenClawDeviceAction: vi.fn(),
   dispatchOpenClawAgentHook: vi.fn(),
@@ -264,5 +270,17 @@ describe("OpenClaw pages", () => {
     expect(
       screen.getByText("目前這個 OpenClaw 版本沒有穩定可用的 wake 派發入口。若要測試任務派發，請先使用左側的 Agent Hook。")
     ).toBeInTheDocument();
+  });
+
+  it("renders empty knowledge source state", async () => {
+    mockPathname = "/openclaw/knowledge";
+    vi.mocked(api.fetchSources).mockResolvedValue([]);
+    vi.mocked(api.fetchKnowledgeIngestionRuns).mockResolvedValue([]);
+    vi.mocked(api.fetchDocumentVersions).mockResolvedValue([]);
+
+    render(<OpenClawKnowledgePage />);
+
+    expect(await screen.findByText("尚無外部知識來源，第一次手動接入後就會自動生成 reusable source。")).toBeInTheDocument();
+    expect(screen.getByText("尚無 knowledge ingestion run，先從上方表單執行一次接入。")).toBeInTheDocument();
   });
 });

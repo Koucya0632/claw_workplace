@@ -13,6 +13,7 @@ const STAGE_LABELS: Record<string, string> = {
   search: "搜索",
   dedupe: "去重",
   filter: "過濾",
+  ingest: "入庫",
   rank: "排序",
   analysis: "分析",
   format: "輸出",

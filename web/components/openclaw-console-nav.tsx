@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { href: "/openclaw/instances", label: "實例" },
   { href: "/openclaw/agents", label: "Agents" },
   { href: "/openclaw/workflow", label: "Workflow" },
+  { href: "/openclaw/knowledge", label: "Knowledge" },
   { href: "/openclaw/daily-news", label: "Daily News" },
   { href: "/openclaw/system-inspection", label: "Inspection" },
   { href: "/openclaw/devices", label: "Devices" },
