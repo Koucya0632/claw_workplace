@@ -24,6 +24,12 @@ class SearchResultItem(BaseModel):
     snippet: str
     matched_on: str
     modified_at: datetime
+    source_url: Optional[str] = None
+    canonical_url: Optional[str] = None
+    published_at: Optional[datetime] = None
+    business_type: Optional[str] = None
+    topic_tags: list[str] = Field(default_factory=list)
+    credibility_tier: Optional[str] = None
 
 
 class SearchResponse(BaseModel):
@@ -42,3 +48,26 @@ class DocumentSummary(BaseModel):
     modified_at: datetime
     content_preview: str
     extracted_text: str
+    source_url: Optional[str] = None
+    canonical_url: Optional[str] = None
+    published_at: Optional[datetime] = None
+    language: Optional[str] = None
+    status: Optional[str] = None
+    business_type: Optional[str] = None
+    topic_tags: list[str] = Field(default_factory=list)
+    credibility_tier: Optional[str] = None
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class DocumentVersionSummary(BaseModel):
+    id: str
+    filename: str
+    source_url: Optional[str] = None
+    canonical_url: Optional[str] = None
+    checksum: str
+    version_group_id: Optional[str] = None
+    version_number: int = 1
+    supersedes_document_id: Optional[str] = None
+    status: Optional[str] = None
+    indexed_at: datetime
+    published_at: Optional[datetime] = None

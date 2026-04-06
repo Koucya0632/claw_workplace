@@ -24,6 +24,9 @@ class OpenClawCliAdapter:
     def get_health(self, instance: OpenClawInstanceResponse, token: Optional[str]) -> dict[str, Any]:
         return self._run_json_command(instance, token, ["gateway", "health", "--json"])
 
+    def get_version(self) -> str:
+        return self._run_global_text_command(["--version"])
+
     def list_agents(self, instance: OpenClawInstanceResponse, token: Optional[str]) -> list[dict[str, Any]]:
         payload = self._run_json_command(instance, token, ["agents", "list", "--json"])
         return _coerce_items(payload)
@@ -91,6 +94,39 @@ class OpenClawCliAdapter:
         payload = self._run_json_lines_command(instance, token, ["logs", "--json", "--limit", str(limit)])
         return _coerce_logs(payload)
 
+    def inspect_plugin(self, plugin_id: str) -> dict[str, Any]:
+        payload = self._run_global_json_command(["plugins", "inspect", plugin_id, "--json"])
+        if not isinstance(payload, dict):
+            raise OpenClawServiceError(
+                "OpenClaw plugin inspect 輸出格式不正確。",
+                detail=truncate_text(str(payload)),
+                source_mode=self.source_mode,
+            )
+        return payload
+
+    def install_plugin_link(self, plugin_path: Path) -> dict[str, Any]:
+        stdout = self._run_global_text_command(["plugins", "install", "--link", str(plugin_path)])
+        return {"message": stdout or f"linked plugin from {plugin_path}"}
+
+    def enable_plugin(self, plugin_id: str) -> dict[str, Any]:
+        stdout = self._run_global_text_command(["plugins", "enable", plugin_id])
+        return {"message": stdout or f"enabled plugin {plugin_id}"}
+
+    def disable_plugin(self, plugin_id: str) -> dict[str, Any]:
+        stdout = self._run_global_text_command(["plugins", "disable", plugin_id])
+        return {"message": stdout or f"disabled plugin {plugin_id}"}
+
+    def get_global_config(self, path: str) -> dict[str, Any]:
+        payload = self._run_global_json_command(["config", "get", path, "--json"])
+        if isinstance(payload, dict):
+            return payload
+        return {"value": payload}
+
+    def set_global_config(self, path: str, value: Any) -> dict[str, Any]:
+        serialized_value = json.dumps(value, ensure_ascii=False)
+        stdout = self._run_global_text_command(["config", "set", path, serialized_value, "--strict-json"])
+        return {"value": value, "message": stdout or f"{path} updated"}
+
     def _run_json_command(
         self,
         instance: OpenClawInstanceResponse,
@@ -106,6 +142,20 @@ class OpenClawCliAdapter:
         except json.JSONDecodeError as error:
             raise OpenClawServiceError(
                 "OpenClaw CLI 輸出不是合法 JSON。",
+                detail=truncate_text(stdout),
+                source_mode=self.source_mode,
+            ) from error
+
+    def _run_global_json_command(self, args: list[str]) -> Union[dict[str, Any], list[dict[str, Any]]]:
+        stdout = self._run_global_text_command(args)
+        if not stdout:
+            return {}
+
+        try:
+            return json.loads(stdout)
+        except json.JSONDecodeError as error:
+            raise OpenClawServiceError(
+                "OpenClaw CLI 全域輸出不是合法 JSON。",
                 detail=truncate_text(stdout),
                 source_mode=self.source_mode,
             ) from error
@@ -149,7 +199,6 @@ class OpenClawCliAdapter:
         args: list[str],
     ) -> str:
         # config set / dry-run 在 2026.4.1 會回純文字成功訊息，因此抽一層純文字執行器共用。
-        command = [self.binary, *args]
         env = {
             "OPENCLAW_GATEWAY_URL": instance.gateway_url,
         }
@@ -157,6 +206,12 @@ class OpenClawCliAdapter:
         if token:
             env["OPENCLAW_GATEWAY_TOKEN"] = token
 
+        return self._run_command([self.binary, *args], env)
+
+    def _run_global_text_command(self, args: list[str]) -> str:
+        return self._run_command([self.binary, *args], {})
+
+    def _run_command(self, command: list[str], env_overrides: dict[str, str]) -> str:
         try:
             completed = subprocess.run(
                 command,
@@ -164,7 +219,7 @@ class OpenClawCliAdapter:
                 text=True,
                 timeout=self.timeout_seconds,
                 check=False,
-                env={**os.environ, **env},
+                env={**os.environ, **env_overrides},
             )
         except subprocess.TimeoutExpired as error:
             raise OpenClawServiceError(

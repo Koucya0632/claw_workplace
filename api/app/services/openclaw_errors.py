@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 
 class OpenClawServiceError(Exception):
@@ -12,9 +12,11 @@ class OpenClawServiceError(Exception):
         detail: Optional[str] = None,
         status_code: int = 400,
         source_mode: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__(message)
         self.message = message
         self.detail = detail
         self.status_code = status_code
         self.source_mode = source_mode
+        self.metadata = metadata or {}

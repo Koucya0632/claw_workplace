@@ -17,4 +17,4 @@ data
 *.db
 playwright-report
 test-results
-
+.openclaw

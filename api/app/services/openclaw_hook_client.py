@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from typing import Any, Optional
 
 from app.schemas.openclaw_instance import OpenClawInstanceResponse
@@ -13,12 +14,13 @@ from app.utils import truncate_text
 class OpenClawHookClient:
     # OpenClaw 2026.4.1 對應的手動派發入口更接近 CLI agent turn，而不是公開 /hooks HTTP 路徑。
     source_mode = "cli"
+    preview_max_length = 500
 
     def __init__(self) -> None:
         from app.config import get_settings
 
         settings = get_settings()
-        self.timeout_seconds = settings.openclaw_cli_timeout_seconds
+        self.timeout_seconds = settings.openclaw_agent_dispatch_timeout_seconds
         self.binary = settings.openclaw_cli_bin
 
     def dispatch_agent(
@@ -42,6 +44,16 @@ class OpenClawHookClient:
             source_mode=self.source_mode,
         )
 
+    def _classify_cli_failure(self, *, stdout: str, stderr: str) -> str:
+        haystack = f"{stderr}\n{stdout}".lower()
+        if "timed out" in haystack or "timeout" in haystack:
+            if "failover" in haystack or "embedded" in haystack or "minimax" in haystack:
+                return "embedded_model_timeout"
+            return "dispatch_timeout"
+        if "failover" in haystack or "embedded_run_failover_decision" in haystack or "surface_error" in haystack:
+            return "embedded_model_timeout"
+        return "cli_nonzero_exit"
+
     def _run_agent_command(
         self,
         instance: OpenClawInstanceResponse,
@@ -51,6 +63,7 @@ class OpenClawHookClient:
         agent_id = str(payload.get("agent_id") or "").strip()
         session_key = str(payload.get("session_key") or "").strip()
         message = str(payload.get("message") or "").strip()
+        timeout_seconds = int(payload.get("timeout_seconds") or self.timeout_seconds)
 
         if not agent_id or not session_key or not message:
             raise OpenClawServiceError(
@@ -84,33 +97,64 @@ class OpenClawHookClient:
         if token:
             env["OPENCLAW_GATEWAY_TOKEN"] = token
 
+        started_at = time.perf_counter()
         try:
             completed = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout_seconds,
+                timeout=timeout_seconds,
                 check=False,
                 env={**os.environ, **env},
             )
         except subprocess.TimeoutExpired as error:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
             raise OpenClawServiceError(
                 "OpenClaw agent 派發逾時。",
-                detail=f"command={' '.join(command)} timeout={self.timeout_seconds}s",
+                detail=f"command={' '.join(command)} timeout={timeout_seconds}s",
                 source_mode=self.source_mode,
+                metadata={
+                    "failure_kind": "dispatch_timeout",
+                    "returncode": None,
+                    "duration_ms": duration_ms,
+                    "stdout_preview": "",
+                    "stderr_preview": "",
+                    "timeout_seconds": timeout_seconds,
+                },
             ) from error
         except OSError as error:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
             raise OpenClawServiceError(
                 "無法執行 OpenClaw agent 命令。",
                 detail=str(error),
                 source_mode=self.source_mode,
+                metadata={
+                    "failure_kind": "cli_nonzero_exit",
+                    "returncode": None,
+                    "duration_ms": duration_ms,
+                    "stdout_preview": "",
+                    "stderr_preview": truncate_text(str(error), self.preview_max_length),
+                    "timeout_seconds": timeout_seconds,
+                },
             ) from error
+
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        stdout = completed.stdout.strip()
+        stderr = completed.stderr.strip()
 
         if completed.returncode != 0:
             raise OpenClawServiceError(
                 "OpenClaw agent 派發失敗。",
-                detail=truncate_text(completed.stderr.strip() or completed.stdout.strip()),
+                detail=truncate_text(stderr or stdout),
                 source_mode=self.source_mode,
+                metadata={
+                    "failure_kind": self._classify_cli_failure(stdout=stdout, stderr=stderr),
+                    "returncode": completed.returncode,
+                    "duration_ms": duration_ms,
+                    "stdout_preview": truncate_text(stdout, self.preview_max_length),
+                    "stderr_preview": truncate_text(stderr, self.preview_max_length),
+                    "timeout_seconds": timeout_seconds,
+                },
             )
 
         stdout = completed.stdout.strip()
@@ -121,9 +165,36 @@ class OpenClawHookClient:
                 "OpenClaw agent 輸出不是合法 JSON。",
                 detail=truncate_text(stdout),
                 source_mode=self.source_mode,
+                metadata={
+                    "failure_kind": "invalid_json_output",
+                    "returncode": completed.returncode,
+                    "duration_ms": duration_ms,
+                    "stdout_preview": truncate_text(stdout, self.preview_max_length),
+                    "stderr_preview": truncate_text(stderr, self.preview_max_length),
+                    "timeout_seconds": timeout_seconds,
+                },
             ) from error
 
         if isinstance(result, dict):
+            result.setdefault("_dispatch_meta", {})
+            result["_dispatch_meta"].update(
+                {
+                    "returncode": completed.returncode,
+                    "duration_ms": duration_ms,
+                    "stdout_preview": truncate_text(stdout, self.preview_max_length),
+                    "stderr_preview": truncate_text(stderr, self.preview_max_length),
+                    "timeout_seconds": timeout_seconds,
+                }
+            )
             return result
 
-        return {"result": result}
+        return {
+            "result": result,
+            "_dispatch_meta": {
+                "returncode": completed.returncode,
+                "duration_ms": duration_ms,
+                "stdout_preview": truncate_text(stdout, self.preview_max_length),
+                "stderr_preview": truncate_text(stderr, self.preview_max_length),
+                "timeout_seconds": timeout_seconds,
+            },
+        }

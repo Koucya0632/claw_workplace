@@ -5,9 +5,9 @@ from collections import OrderedDict
 from datetime import datetime
 from typing import Any
 
-from app.repositories.database import get_connection
-from app.schemas.search import DocumentSummary, SearchRequest, SearchResponse, SearchResultItem
-from app.utils import new_id, utc_now_iso
+from app.repositories.database import adapt_json, get_connection
+from app.schemas.search import DocumentSummary, DocumentVersionSummary, SearchRequest, SearchResponse, SearchResultItem
+from app.utils import json_loads, new_id, utc_now_iso
 
 
 class DocumentRepository:
@@ -43,9 +43,12 @@ class DocumentRepository:
                     INSERT INTO documents (
                         id, source_id, relative_path, filename, extension, mime_type, file_size,
                         checksum, modified_at, indexed_at, content_preview, extracted_text,
-                        created_by, updated_by, role_hint
+                        document_kind, source_url, canonical_url, published_at, language, status,
+                        trust_score, relevance_score, duplicate_group_id, business_type, metadata_json,
+                        version_group_id, version_number, supersedes_document_id, first_seen_at, last_seen_at,
+                        last_checked_at, created_by, updated_by, role_hint
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         document["id"],
@@ -60,6 +63,23 @@ class DocumentRepository:
                         document["indexed_at"],
                         document["content_preview"],
                         document["extracted_text"],
+                        document.get("document_kind", "local_file"),
+                        document.get("source_url"),
+                        document.get("canonical_url"),
+                        document.get("published_at"),
+                        document.get("language"),
+                        document.get("status", "active"),
+                        document.get("trust_score"),
+                        document.get("relevance_score"),
+                        document.get("duplicate_group_id"),
+                        document.get("business_type"),
+                        adapt_json(document.get("metadata", {})),
+                        document.get("version_group_id"),
+                        document.get("version_number", 1),
+                        document.get("supersedes_document_id"),
+                        document.get("first_seen_at"),
+                        document.get("last_seen_at"),
+                        document.get("last_checked_at"),
                         "system",
                         "system",
                         "member",
@@ -94,6 +114,8 @@ class DocumentRepository:
                         ),
                     )
 
+                self._replace_tags(connection, document["id"], document.get("tags", []))
+
     def get_document(self, document_id: str) -> DocumentSummary:
         with get_connection() as connection:
             row = connection.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
@@ -110,6 +132,15 @@ class DocumentRepository:
             modified_at=datetime.fromisoformat(row["modified_at"]),
             content_preview=row["content_preview"],
             extracted_text=row["extracted_text"],
+            source_url=row["source_url"],
+            canonical_url=row["canonical_url"],
+            published_at=_parse_datetime(row["published_at"]),
+            language=row["language"],
+            status=row["status"],
+            business_type=row["business_type"],
+            topic_tags=self._get_tags(document_id, "topic"),
+            credibility_tier=_metadata_value(row["metadata_json"], "credibility_tier"),
+            metadata=json_loads(row["metadata_json"], {}),
         )
 
     def search(self, payload: SearchRequest) -> SearchResponse:
@@ -132,13 +163,85 @@ class DocumentRepository:
             semantic_search_ready=False,
         )
 
+    def upsert_knowledge_document(self, source_id: str, document: dict[str, Any]) -> tuple[str, str]:
+        canonical_url = document.get("canonical_url")
+        checksum = document["checksum"]
+        now = utc_now_iso()
+
+        with get_connection() as connection:
+            existing = self._find_existing_document(connection, canonical_url=canonical_url, checksum=checksum)
+            if existing is not None:
+                connection.execute(
+                    """
+                    UPDATE documents
+                    SET last_seen_at = ?, last_checked_at = ?, metadata_json = ?
+                    WHERE id = ?
+                    """,
+                    (now, now, adapt_json(document.get("metadata", {})), existing["id"]),
+                )
+                self._replace_tags(connection, existing["id"], document.get("tags", []))
+                return existing["id"], "duplicate"
+
+            previous = self._find_existing_document(connection, canonical_url=canonical_url, checksum=None)
+            previous_id = previous["id"] if previous else None
+            version_group_id = previous["version_group_id"] if previous and previous["version_group_id"] else new_id("ver")
+            version_number = int(previous["version_number"] or 1) + 1 if previous else 1
+
+            if previous_id is not None:
+                connection.execute(
+                    "UPDATE documents SET status = ?, last_checked_at = ? WHERE id = ?",
+                    ("superseded", now, previous_id),
+                )
+
+            self._insert_document(connection, source_id, document, version_group_id, version_number, previous_id)
+            self._replace_tags(connection, document["id"], document.get("tags", []))
+            return document["id"], "updated" if previous_id else "inserted"
+
+    def list_versions(self, document_id: str) -> list[DocumentVersionSummary]:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT version_group_id FROM documents WHERE id = ?",
+                (document_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"找不到文件：{document_id}")
+            version_group_id = row["version_group_id"]
+            if not version_group_id:
+                version_row = connection.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
+                return [self._row_to_version_summary(version_row)] if version_row else []
+
+            rows = connection.execute(
+                """
+                SELECT * FROM documents
+                WHERE version_group_id = ?
+                ORDER BY version_number DESC, indexed_at DESC
+                """,
+                (version_group_id,),
+            ).fetchall()
+        return [self._row_to_version_summary(item) for item in rows]
+
+    def find_existing_document(
+        self,
+        *,
+        canonical_url: str | None,
+        checksum: str | None,
+    ) -> dict[str, Any] | None:
+        with get_connection() as connection:
+            row = self._find_existing_document(
+                connection,
+                canonical_url=canonical_url,
+                checksum=checksum,
+            )
+        return dict(row) if row is not None else None
+
     def _search_filename(self, payload: SearchRequest) -> list[SearchResultItem]:
-        clauses = ["d.filename LIKE ?"]
+        clauses = ["d.filename LIKE ?", "(d.status IS NULL OR d.status != 'superseded')"]
         params: list[Any] = [f"%{payload.query}%"]
         self._append_filters(payload, clauses, params)
 
         sql = f"""
-            SELECT d.id, d.source_id, s.name AS source_name, d.filename, d.relative_path, d.modified_at
+            SELECT d.id, d.source_id, s.name AS source_name, d.filename, d.relative_path, d.modified_at,
+                   d.source_url, d.canonical_url, d.published_at, d.business_type, d.metadata_json
             FROM documents d
             JOIN sources s ON s.id = d.source_id
             WHERE {' AND '.join(clauses)}
@@ -158,6 +261,12 @@ class DocumentRepository:
                 snippet=f"檔名命中：{row['filename']}",
                 matched_on="filename",
                 modified_at=datetime.fromisoformat(row["modified_at"]),
+                source_url=row["source_url"],
+                canonical_url=row["canonical_url"],
+                published_at=_parse_datetime(row["published_at"]),
+                business_type=row["business_type"],
+                topic_tags=self._get_tags(row["id"], "topic"),
+                credibility_tier=_metadata_value(row["metadata_json"], "credibility_tier"),
             )
             for row in rows
         ]
@@ -165,12 +274,13 @@ class DocumentRepository:
     def _search_content(self, payload: SearchRequest) -> list[SearchResultItem]:
         like_rows = self._search_content_like(payload)
         match_query = " AND ".join(token for token in payload.query.split() if token.strip())
-        clauses = ["document_chunks_fts MATCH ?"]
+        clauses = ["document_chunks_fts MATCH ?", "(d.status IS NULL OR d.status != 'superseded')"]
         params: list[Any] = [match_query or payload.query]
         self._append_filters(payload, clauses, params, prefix="d")
 
         sql = f"""
-            SELECT d.id, d.source_id, s.name AS source_name, d.filename, d.relative_path, d.modified_at, c.content
+            SELECT d.id, d.source_id, s.name AS source_name, d.filename, d.relative_path, d.modified_at, c.content,
+                   d.source_url, d.canonical_url, d.published_at, d.business_type, d.metadata_json
             FROM document_chunks_fts fts
             JOIN document_chunks c ON c.id = fts.chunk_id
             JOIN documents d ON d.id = fts.document_id
@@ -203,17 +313,24 @@ class DocumentRepository:
                 snippet=row["content"][:180],
                 matched_on="content",
                 modified_at=datetime.fromisoformat(row["modified_at"]),
+                source_url=row["source_url"],
+                canonical_url=row["canonical_url"],
+                published_at=_parse_datetime(row["published_at"]),
+                business_type=row["business_type"],
+                topic_tags=self._get_tags(row["id"], "topic"),
+                credibility_tier=_metadata_value(row["metadata_json"], "credibility_tier"),
             )
             for row in deduped.values()
         ]
 
     def _search_content_like(self, payload: SearchRequest) -> list[sqlite3.Row]:
         # LIKE 搜索在中文與特殊字元場景更穩定，因此會與 FTS 結果合併。
-        like_clauses = ["c.content LIKE ?"]
+        like_clauses = ["c.content LIKE ?", "(d.status IS NULL OR d.status != 'superseded')"]
         like_params: list[Any] = [f"%{payload.query}%"]
         self._append_filters(payload, like_clauses, like_params, prefix="d")
         fallback_sql = f"""
-            SELECT d.id, d.source_id, s.name AS source_name, d.filename, d.relative_path, d.modified_at, c.content
+            SELECT d.id, d.source_id, s.name AS source_name, d.filename, d.relative_path, d.modified_at, c.content,
+                   d.source_url, d.canonical_url, d.published_at, d.business_type, d.metadata_json
             FROM document_chunks c
             JOIN documents d ON d.id = c.document_id
             JOIN sources s ON s.id = d.source_id
@@ -244,6 +361,161 @@ class DocumentRepository:
             clauses.append(f"{prefix}.modified_at <= ?")
             params.append(payload.end_date.isoformat())
 
+    def _find_existing_document(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        canonical_url: str | None,
+        checksum: str | None,
+    ) -> sqlite3.Row | None:
+        if canonical_url:
+            row = connection.execute(
+                """
+                SELECT * FROM documents
+                WHERE canonical_url = ?
+                ORDER BY version_number DESC, indexed_at DESC
+                LIMIT 1
+                """,
+                (canonical_url,),
+            ).fetchone()
+            if row is not None:
+                if checksum is None or row["checksum"] == checksum:
+                    return row
+
+        if checksum:
+            return connection.execute(
+                """
+                SELECT * FROM documents
+                WHERE checksum = ?
+                ORDER BY indexed_at DESC
+                LIMIT 1
+                """,
+                (checksum,),
+            ).fetchone()
+        return None
+
+    def _insert_document(
+        self,
+        connection: sqlite3.Connection,
+        source_id: str,
+        document: dict[str, Any],
+        version_group_id: str,
+        version_number: int,
+        supersedes_document_id: str | None,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO documents (
+                id, source_id, relative_path, filename, extension, mime_type, file_size,
+                checksum, modified_at, indexed_at, content_preview, extracted_text,
+                document_kind, source_url, canonical_url, published_at, language, status,
+                trust_score, relevance_score, duplicate_group_id, business_type, metadata_json,
+                version_group_id, version_number, supersedes_document_id, first_seen_at, last_seen_at,
+                last_checked_at, created_by, updated_by, role_hint
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                document["id"],
+                source_id,
+                document["relative_path"],
+                document["filename"],
+                document["extension"],
+                document["mime_type"],
+                document["file_size"],
+                document["checksum"],
+                document["modified_at"],
+                document["indexed_at"],
+                document["content_preview"],
+                document["extracted_text"],
+                document.get("document_kind", "external_web"),
+                document.get("source_url"),
+                document.get("canonical_url"),
+                document.get("published_at"),
+                document.get("language"),
+                document.get("status", "active"),
+                document.get("trust_score"),
+                document.get("relevance_score"),
+                document.get("duplicate_group_id"),
+                document.get("business_type"),
+                adapt_json(document.get("metadata", {})),
+                version_group_id,
+                version_number,
+                supersedes_document_id,
+                document.get("first_seen_at"),
+                document.get("last_seen_at"),
+                document.get("last_checked_at"),
+                "system",
+                "system",
+                "member",
+            ),
+        )
+        for chunk in document["chunks"]:
+            connection.execute(
+                """
+                INSERT INTO document_chunks (id, document_id, chunk_index, content, token_count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chunk["id"],
+                    document["id"],
+                    chunk["chunk_index"],
+                    chunk["content"],
+                    chunk["token_count"],
+                    utc_now_iso(),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO document_chunks_fts (chunk_id, document_id, filename, content)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    chunk["id"],
+                    document["id"],
+                    document["filename"],
+                    chunk["content"],
+                ),
+            )
+
+    def _replace_tags(self, connection: sqlite3.Connection, document_id: str, tags: list[dict[str, str]]) -> None:
+        connection.execute("DELETE FROM document_tags WHERE document_id = ?", (document_id,))
+        for tag in tags:
+            connection.execute(
+                """
+                INSERT INTO document_tags (id, document_id, tag_type, tag_value, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (new_id("tag"), document_id, tag["tag_type"], tag["tag_value"], utc_now_iso()),
+            )
+
+    def _get_tags(self, document_id: str, tag_type: str) -> list[str]:
+        with get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT tag_value FROM document_tags
+                WHERE document_id = ? AND tag_type = ?
+                ORDER BY tag_value ASC
+                """,
+                (document_id, tag_type),
+            ).fetchall()
+        return [row["tag_value"] for row in rows]
+
+    def _row_to_version_summary(self, row: sqlite3.Row) -> DocumentVersionSummary:
+        return DocumentVersionSummary(
+            id=row["id"],
+            filename=row["filename"],
+            source_url=row["source_url"],
+            canonical_url=row["canonical_url"],
+            checksum=row["checksum"],
+            version_group_id=row["version_group_id"],
+            version_number=int(row["version_number"] or 1),
+            supersedes_document_id=row["supersedes_document_id"],
+            status=row["status"],
+            indexed_at=datetime.fromisoformat(row["indexed_at"]),
+            published_at=_parse_datetime(row["published_at"]),
+        )
+
 
 def make_document_record(
     *,
@@ -258,6 +530,24 @@ def make_document_record(
     content_preview: str,
     extracted_text: str,
     chunks: list[dict[str, Any]],
+    document_kind: str = "local_file",
+    source_url: str | None = None,
+    canonical_url: str | None = None,
+    published_at: str | None = None,
+    language: str | None = None,
+    status: str = "active",
+    trust_score: float | None = None,
+    relevance_score: float | None = None,
+    duplicate_group_id: str | None = None,
+    business_type: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    version_group_id: str | None = None,
+    version_number: int = 1,
+    supersedes_document_id: str | None = None,
+    first_seen_at: str | None = None,
+    last_seen_at: str | None = None,
+    last_checked_at: str | None = None,
+    tags: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     # 這個工廠函式讓 IndexingService 在組裝資料時更容易測試與重用。
     return {
@@ -274,6 +564,24 @@ def make_document_record(
         "content_preview": content_preview,
         "extracted_text": extracted_text,
         "chunks": chunks,
+        "document_kind": document_kind,
+        "source_url": source_url,
+        "canonical_url": canonical_url,
+        "published_at": published_at,
+        "language": language,
+        "status": status,
+        "trust_score": trust_score,
+        "relevance_score": relevance_score,
+        "duplicate_group_id": duplicate_group_id,
+        "business_type": business_type,
+        "metadata": metadata or {},
+        "version_group_id": version_group_id or new_id("ver"),
+        "version_number": version_number,
+        "supersedes_document_id": supersedes_document_id,
+        "first_seen_at": first_seen_at,
+        "last_seen_at": last_seen_at,
+        "last_checked_at": last_checked_at,
+        "tags": tags or [],
     }
 
 
@@ -297,3 +605,13 @@ def make_chunk_records(text: str, chunk_size: int = 900) -> list[dict[str, Any]]
         index += 1
 
     return chunks
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def _metadata_value(raw_metadata: str | None, key: str) -> str | None:
+    metadata = json_loads(raw_metadata, {})
+    value = metadata.get(key)
+    return str(value) if value is not None else None

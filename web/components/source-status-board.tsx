@@ -1,5 +1,5 @@
 import { PixelCard } from "@/components/pixel-card";
-import { StatusPill } from "@/components/status-pill";
+import { SourceStatusBadge, SourceSyncBadge } from "@/components/source-badges";
 import type { SourceResponse } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
 
@@ -24,9 +24,14 @@ export function SourceStatusBoard({ sources, onScan, busySourceId }: SourceStatu
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h3 className="text-sm font-black tracking-[0.08em]">{source.name}</h3>
-                  <p className="text-xs text-slate-500">{source.config.path ?? "未設定路徑"}</p>
+                  <p className="text-xs text-slate-500">
+                    {source.config.path ?? source.config.url ?? source.config.urls?.[0] ?? "未設定路徑"}
+                  </p>
                 </div>
-                <StatusPill status={source.status} />
+                <div className="flex flex-wrap gap-2">
+                  <SourceStatusBadge status={source.is_enabled ? source.status : "disabled"} />
+                  <SourceSyncBadge status={source.last_sync_status} />
+                </div>
               </div>
               <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600">
                 <span>最後掃描：{formatDateTime(source.last_scan_at)}</span>
@@ -48,4 +53,3 @@ export function SourceStatusBoard({ sources, onScan, busySourceId }: SourceStatu
     </PixelCard>
   );
 }
-

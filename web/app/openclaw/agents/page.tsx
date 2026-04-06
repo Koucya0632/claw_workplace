@@ -6,7 +6,7 @@ import { OpenClawInstancePicker } from "@/components/openclaw-instance-picker";
 import { OpenClawPageShell } from "@/components/openclaw-page-shell";
 import { PixelCard } from "@/components/pixel-card";
 import { StatusPill } from "@/components/status-pill";
-import { createOpenClawAgent, fetchOpenClawAgents, fetchOpenClawInstances } from "@/lib/api";
+import { createOpenClawAgent, fetchOpenClawAgents, fetchOpenClawInstances, updateOpenClawAgentSearchCapability } from "@/lib/api";
 import type { OpenClawAgentSummary, OpenClawInstanceResponse } from "@/lib/types";
 
 const AGENT_ROLES = [
@@ -22,6 +22,8 @@ export default function OpenClawAgentsPage() {
   const [name, setName] = useState("Support Agent");
   const [roleHint, setRoleHint] = useState("operator");
   const [prompt, setPrompt] = useState("");
+  const [searchEnabledOnCreate, setSearchEnabledOnCreate] = useState(true);
+  const [busyCapabilityAgentId, setBusyCapabilityAgentId] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [isPending, startTransition] = useTransition();
@@ -83,19 +85,53 @@ export default function OpenClawAgentsPage() {
           prompt: prompt || undefined,
           role_hint: roleHint || undefined
         });
+        if (searchEnabledOnCreate) {
+          const capability = await updateOpenClawAgentSearchCapability({
+            instance_id: selectedInstanceId,
+            agent_id: agent.id,
+            enabled: true
+          });
+          setMessage(capability.message || `已建立 Agent：${agent.name}，並啟用原生搜索工具。`);
+        } else {
+          setMessage(`已建立 Agent：${agent.name}`);
+        }
         await loadAgents(selectedInstanceId);
         setPrompt("");
-        setMessage(`已建立 Agent：${agent.name}`);
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : "建立 Agent 失敗");
       }
     });
   }
 
+  async function handleToggleSearchCapability(agent: OpenClawAgentSummary, nextEnabled: boolean) {
+    if (!selectedInstanceId) {
+      setError("請先選擇 OpenClaw Instance。");
+      return;
+    }
+
+    setBusyCapabilityAgentId(agent.id);
+    setError("");
+    setMessage("");
+
+    try {
+      const capability = await updateOpenClawAgentSearchCapability({
+        instance_id: selectedInstanceId,
+        agent_id: agent.id,
+        enabled: nextEnabled
+      });
+      await loadAgents(selectedInstanceId);
+      setMessage(capability.message || `${agent.name} 原生搜索能力已更新。`);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "更新搜索能力失敗");
+    } finally {
+      setBusyCapabilityAgentId("");
+    }
+  }
+
   return (
     <OpenClawPageShell
       title="OpenClaw Agent 管理"
-      description="先選擇目標 Instance，再查看目前 Agent 清單或建立新的 Agent。Phase 1 先聚焦於清單與建立流程。"
+      description="先選擇目標 Instance，再查看目前 Agent 清單或建立新的 Agent。這一版會直接管理原生搜索 plugin readiness，不再依賴 workspace exec 腳本。"
       roles={AGENT_ROLES}
     >
       <PixelCard title="Agent 控制區" eyebrow="Agents">
@@ -147,6 +183,15 @@ export default function OpenClawAgentsPage() {
           className="mt-4 min-h-[160px] w-full border-4 border-ink bg-sand px-4 py-3 text-sm outline-none"
           placeholder="Agent Prompt（選填）"
         />
+        <label className="mt-4 flex items-center gap-3 border-4 border-ink bg-white px-4 py-3 text-sm text-slate-700">
+          <input
+            type="checkbox"
+            checked={searchEnabledOnCreate}
+            onChange={(event) => setSearchEnabledOnCreate(event.target.checked)}
+            className="h-4 w-4"
+          />
+          建立後立刻開啟 `search_api`，並同步原生搜索 plugin
+        </label>
       </PixelCard>
 
       <PixelCard title="Agent 清單" eyebrow="List">
@@ -170,6 +215,56 @@ export default function OpenClawAgentsPage() {
                   <StatusPill status={agent.status} />
                 </div>
                 <div className="mt-3 text-sm text-slate-700">綁定通道數：{agent.channel_count}</div>
+                <div className="mt-3 border-4 border-ink bg-sand p-3 text-sm text-slate-700">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      搜索能力：
+                      <span className="ml-2 font-black">
+                        {isSearchCapabilityEnabled(agent) ? "已啟用" : "未啟用"}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleSearchCapability(agent, !isSearchCapabilityEnabled(agent))}
+                      disabled={busyCapabilityAgentId === agent.id}
+                      className="pixel-button bg-coral px-4 py-2 text-xs font-black tracking-[0.08em] text-white disabled:opacity-60"
+                    >
+                      {busyCapabilityAgentId === agent.id
+                        ? "同步中..."
+                        : isSearchCapabilityEnabled(agent)
+                          ? "停用搜索能力"
+                          : "啟用搜索能力"}
+                    </button>
+                  </div>
+                  <div className="mt-3 grid gap-2 text-xs lg:grid-cols-3">
+                    <div className="border-4 border-ink bg-white px-3 py-2">
+                      <span className="font-black">Native Plugin</span>
+                      <div className="mt-1">
+                        {getSearchCapabilityFlag(agent, "plugin_ready") ? "已就緒" : "未就緒"}
+                      </div>
+                    </div>
+                    <div className="border-4 border-ink bg-white px-3 py-2">
+                      <span className="font-black">Plugin 啟用</span>
+                      <div className="mt-1">
+                        {getSearchCapabilityFlag(agent, "plugin_enabled") ? "已啟用" : "未啟用"}
+                      </div>
+                    </div>
+                    <div className="border-4 border-ink bg-white px-3 py-2">
+                      <span className="font-black">ACPX Bridge</span>
+                      <div className="mt-1">
+                        {getSearchCapabilityFlag(agent, "bridge_ready") ? "已就緒" : "待處理"}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="mt-3 text-xs text-slate-500">
+                    {getSearchCapabilityMessage(agent) || "啟用後會把 repo 內原生 plugin 掛到 OpenClaw，之後 agent 會直接呼叫 native tool。"}
+                  </div>
+                  {getSearchCapabilityPluginId(agent) ? (
+                    <div className="mt-1 text-[11px] uppercase tracking-[0.08em] text-slate-400">
+                      plugin id: {getSearchCapabilityPluginId(agent)}
+                    </div>
+                  ) : null}
+                </div>
               </article>
             ))}
           </div>
@@ -177,4 +272,49 @@ export default function OpenClawAgentsPage() {
       </PixelCard>
     </OpenClawPageShell>
   );
+}
+
+function isSearchCapabilityEnabled(agent: OpenClawAgentSummary): boolean {
+  const capabilities = agent.metadata.capabilities;
+  if (!capabilities || typeof capabilities !== "object") {
+    return false;
+  }
+
+  const searchCapability = (capabilities as Record<string, unknown>).search_api;
+  if (!searchCapability || typeof searchCapability !== "object") {
+    return false;
+  }
+
+  return Boolean((searchCapability as Record<string, unknown>).enabled);
+}
+
+function getSearchCapabilityFlag(agent: OpenClawAgentSummary, key: string): boolean {
+  const capability = getSearchCapability(agent);
+  return Boolean(capability?.[key]);
+}
+
+function getSearchCapabilityMessage(agent: OpenClawAgentSummary): string {
+  const capability = getSearchCapability(agent);
+  const value = capability?.last_sync_message;
+  return typeof value === "string" ? value : "";
+}
+
+function getSearchCapabilityPluginId(agent: OpenClawAgentSummary): string {
+  const capability = getSearchCapability(agent);
+  const value = capability?.plugin_id;
+  return typeof value === "string" ? value : "";
+}
+
+function getSearchCapability(agent: OpenClawAgentSummary): Record<string, unknown> | null {
+  const capabilities = agent.metadata.capabilities;
+  if (!capabilities || typeof capabilities !== "object") {
+    return null;
+  }
+
+  const searchCapability = (capabilities as Record<string, unknown>).search_api;
+  if (!searchCapability || typeof searchCapability !== "object") {
+    return null;
+  }
+
+  return searchCapability as Record<string, unknown>;
 }

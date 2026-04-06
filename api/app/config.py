@@ -36,7 +36,25 @@ class Settings(BaseSettings):
     # OpenClaw 管理整合 Phase 1 透過 CLI 與 Hooks 對 Gateway 溝通。
     openclaw_cli_bin: str = Field(default="openclaw", alias="OPENCLAW_CLI_BIN")
     openclaw_cli_timeout_seconds: int = Field(default=20, alias="OPENCLAW_CLI_TIMEOUT_SECONDS")
+    openclaw_agent_dispatch_timeout_seconds: int = Field(default=90, alias="OPENCLAW_AGENT_DISPATCH_TIMEOUT_SECONDS")
+    openclaw_news_agent_dispatch_timeout_seconds: int = Field(default=180, alias="OPENCLAW_NEWS_AGENT_DISPATCH_TIMEOUT_SECONDS")
+    openclaw_workflow_dispatch_retry_count: int = Field(default=1, alias="OPENCLAW_WORKFLOW_DISPATCH_RETRY_COUNT")
+    openclaw_workflow_dispatch_retry_backoff_ms: int = Field(default=1200, alias="OPENCLAW_WORKFLOW_DISPATCH_RETRY_BACKOFF_MS")
     openclaw_secret_key: str = Field(default="", alias="OPENCLAW_SECRET_KEY")
+    openclaw_agent_tool_api_base_url: str = Field(default="", alias="OPENCLAW_AGENT_TOOL_API_BASE_URL")
+    openclaw_agent_search_default_limit: int = Field(default=5, alias="OPENCLAW_AGENT_SEARCH_DEFAULT_LIMIT")
+    openclaw_agent_document_max_chars: int = Field(default=8000, alias="OPENCLAW_AGENT_DOCUMENT_MAX_CHARS")
+    openclaw_knowledge_discovery_timeout_seconds: int = Field(default=15, alias="OPENCLAW_KNOWLEDGE_DISCOVERY_TIMEOUT_SECONDS")
+    openclaw_knowledge_fetch_timeout_seconds: int = Field(default=20, alias="OPENCLAW_KNOWLEDGE_FETCH_TIMEOUT_SECONDS")
+    openclaw_knowledge_default_limit: int = Field(default=5, alias="OPENCLAW_KNOWLEDGE_DEFAULT_LIMIT")
+    openclaw_daily_news_telegram_bot_token: str = Field(default="", alias="OPENCLAW_DAILY_NEWS_TELEGRAM_BOT_TOKEN")
+    openclaw_daily_news_telegram_timeout_seconds: int = Field(default=20, alias="OPENCLAW_DAILY_NEWS_TELEGRAM_TIMEOUT_SECONDS")
+    openclaw_daily_news_discord_bot_token: str = Field(default="", alias="OPENCLAW_DAILY_NEWS_DISCORD_BOT_TOKEN")
+    openclaw_daily_news_discord_timeout_seconds: int = Field(default=20, alias="OPENCLAW_DAILY_NEWS_DISCORD_TIMEOUT_SECONDS")
+    openclaw_system_inspection_telegram_bot_token: str = Field(default="", alias="OPENCLAW_SYSTEM_INSPECTION_TELEGRAM_BOT_TOKEN")
+    openclaw_system_inspection_telegram_timeout_seconds: int = Field(default=20, alias="OPENCLAW_SYSTEM_INSPECTION_TELEGRAM_TIMEOUT_SECONDS")
+    openclaw_system_inspection_discord_bot_token: str = Field(default="", alias="OPENCLAW_SYSTEM_INSPECTION_DISCORD_BOT_TOKEN")
+    openclaw_system_inspection_discord_timeout_seconds: int = Field(default=20, alias="OPENCLAW_SYSTEM_INSPECTION_DISCORD_TIMEOUT_SECONDS")
 
     # LLM provider 先保留抽象，只在這一版預設選 minimax。
     llm_provider: str = Field(default="minimax", alias="OPENCLAW_LLM_PROVIDER")
@@ -64,6 +82,15 @@ class Settings(BaseSettings):
             if normalized:
                 cleaned.append(normalized)
         return cleaned
+
+    @property
+    def openclaw_agent_tool_api_base_url_resolved(self) -> str:
+        # Agent workspace 內的工具腳本需要一個可直連本機 API 的穩定 base URL。
+        if self.openclaw_agent_tool_api_base_url.strip():
+            return self.openclaw_agent_tool_api_base_url.strip().rstrip("/")
+
+        host = "127.0.0.1" if self.api_host in {"0.0.0.0", "::", ""} else self.api_host
+        return f"http://{host}:{self.api_port}/api/v1"
 
 
 @lru_cache
