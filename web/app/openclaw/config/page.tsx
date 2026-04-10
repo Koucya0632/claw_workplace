@@ -33,6 +33,8 @@ export default function OpenClawConfigPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [isPending, startTransition] = useTransition();
+  const hasInstances = instances.length > 0;
+  const canManageConfig = Boolean(selectedInstanceId);
 
   useEffect(() => {
     startTransition(async () => {
@@ -40,6 +42,11 @@ export default function OpenClawConfigPage() {
         const instancePayload = await fetchOpenClawInstances();
         setInstances(instancePayload);
         setSelectedInstanceId(instancePayload[0]?.id ?? "");
+        if (instancePayload.length === 0) {
+          setCurrentConfig(null);
+          setValidation(null);
+          setMessage("先建立 OpenClaw Instance，這裡才能讀取與寫入 Config。");
+        }
         setError("");
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : "無法載入 Config 頁");
@@ -118,9 +125,11 @@ export default function OpenClawConfigPage() {
 
   return (
     <OpenClawPageShell
-      title="OpenClaw Config 管理"
-      description="Config 頁支援依 path 讀取、dry-run 驗證與寫入。Phase 1 以安全表單為主，不做即時跟隨更新。"
+      title="Config"
+      description="Config 是 OpenClaw Control Center 內的 Admin Tools 分區，支援依 path 讀取、dry-run 驗證與寫入，避免直接在 Gateway 上做即時追改。"
       roles={CONFIG_ROLES}
+      sectionGroup="Admin Tools"
+      sectionLabel="Config"
     >
       <PixelCard title="Config 控制台" eyebrow="Config">
         <div className="grid gap-4 lg:grid-cols-[280px_1fr_auto_auto_auto]">
@@ -128,6 +137,7 @@ export default function OpenClawConfigPage() {
             instances={instances}
             value={selectedInstanceId}
             onChange={setSelectedInstanceId}
+            disabled={!hasInstances || isPending}
           />
           <input
             value={path}
@@ -138,21 +148,24 @@ export default function OpenClawConfigPage() {
           <button
             type="button"
             onClick={handleLoadConfig}
-            className="pixel-button bg-teal px-4 py-3 text-sm font-black tracking-[0.08em] text-white"
+            disabled={!canManageConfig || isPending}
+            className="pixel-button bg-teal px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
           >
             讀取
           </button>
           <button
             type="button"
             onClick={handleValidate}
-            className="pixel-button bg-gold px-4 py-3 text-sm font-black tracking-[0.08em] text-ink"
+            disabled={!canManageConfig || isPending}
+            className="pixel-button bg-gold px-4 py-3 text-sm font-black tracking-[0.08em] text-ink disabled:opacity-60"
           >
             Validate
           </button>
           <button
             type="button"
             onClick={handleSave}
-            className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white"
+            disabled={!canManageConfig || isPending}
+            className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
           >
             保存
           </button>
@@ -173,18 +186,18 @@ export default function OpenClawConfigPage() {
       <div className="grid gap-5 xl:grid-cols-2">
         <PixelCard title="目前 Config" eyebrow="Loaded">
           <div className="text-sm leading-7 text-slate-700">
-            {currentConfig ? (
+          {currentConfig ? (
               <>
                 <p>Path：{currentConfig.path}</p>
                 <pre className="mt-4 overflow-x-auto border-4 border-ink bg-white p-4 text-xs">
                   {JSON.stringify(currentConfig.value, null, 2)}
                 </pre>
               </>
-            ) : (
-              <p>{isPending ? "正在初始化 Config 頁..." : "尚未讀取任何 Config。"} </p>
-            )}
-          </div>
-        </PixelCard>
+          ) : (
+            <p>{hasInstances ? (isPending ? "正在初始化 Config 頁..." : "尚未讀取任何 Config。") : "先建立 OpenClaw Instance，再回來讀取設定。"} </p>
+          )}
+        </div>
+      </PixelCard>
 
         <PixelCard title="Validate 結果" eyebrow="Validation">
           {validation ? (

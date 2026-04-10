@@ -104,6 +104,8 @@ export default function OpenClawWorkflowPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [isPending, startTransition] = useTransition();
+  const hasInstances = instances.length > 0;
+  const canManageWorkflow = Boolean(selectedInstanceId);
 
   useEffect(() => {
     startTransition(async () => {
@@ -112,6 +114,10 @@ export default function OpenClawWorkflowPage() {
         setInstances(instancePayload);
         const nextInstanceId = instancePayload[0]?.id ?? "";
         setSelectedInstanceId((current) => current || nextInstanceId);
+        if (!nextInstanceId) {
+          setAgents([]);
+          setMessage("先建立 OpenClaw Instance，再配置主控秘書與多專職 agent。");
+        }
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : "無法載入 OpenClaw Instances");
       }
@@ -121,6 +127,11 @@ export default function OpenClawWorkflowPage() {
   useEffect(() => {
     if (!selectedInstanceId) {
       setAgents([]);
+      setControllerAgentId("");
+      setSearchAgentId("");
+      setAnalysisAgentId("");
+      setReportAgentId("");
+      setSpecialists(DEFAULT_SPECIALISTS);
       return;
     }
 
@@ -206,12 +217,19 @@ export default function OpenClawWorkflowPage() {
   return (
     <OpenClawPageShell
       title="Workflow Agent Mapping"
-      description="這裡決定主控秘書 agent、核心流程 agent、專職池與分派 / 接管規則。配置完成後，`/search` 的 workflow 與 Web Search 都會按這套協作邏輯運作。"
+      description="Workflow 是 OpenClaw Control Center 內的 Admin Tools 分區，這裡決定主控秘書、核心流程、專職池與接管規則。配置完成後，`/search` 會按這套協作邏輯運作。"
       roles={WORKFLOW_ROLES}
+      sectionGroup="Admin Tools"
+      sectionLabel="Workflow"
     >
       <PixelCard title="Workflow 設定" eyebrow="Mapping">
         <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
-          <OpenClawInstancePicker instances={instances} value={selectedInstanceId} onChange={setSelectedInstanceId} />
+          <OpenClawInstancePicker
+            instances={instances}
+            value={selectedInstanceId}
+            onChange={setSelectedInstanceId}
+            disabled={!hasInstances || isPending}
+          />
           <div className="border-4 border-ink bg-white px-4 py-3 text-sm leading-7 text-slate-700">
             {error ? <span className="text-coral">{error}</span> : message || "先選擇 Instance，再配置主控秘書與多專職 agent。"}
           </div>
@@ -260,7 +278,7 @@ export default function OpenClawWorkflowPage() {
         <button
           type="button"
           onClick={handleSave}
-          disabled={isPending}
+          disabled={!canManageWorkflow || isPending || agents.length === 0}
           className="pixel-button mt-4 bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
         >
           {isPending ? "儲存中..." : "儲存 Workflow 設定"}

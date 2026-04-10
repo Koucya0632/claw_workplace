@@ -47,6 +47,8 @@ export default function OpenClawActionsPage() {
   const [message, setMessage] = useState("");
   const [agentResult, setAgentResult] = useState<AgentHookResult | null>(null);
   const [isPending, startTransition] = useTransition();
+  const hasInstances = instances.length > 0;
+  const canDispatch = Boolean(selectedInstanceId);
 
   useEffect(() => {
     startTransition(async () => {
@@ -54,6 +56,9 @@ export default function OpenClawActionsPage() {
         const instancePayload = await fetchOpenClawInstances();
         setInstances(instancePayload);
         setSelectedInstanceId(instancePayload[0]?.id ?? "");
+        if (instancePayload.length === 0) {
+          setMessage("先建立 OpenClaw Instance，這裡才能手動派發 Agent Hook。");
+        }
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : "無法載入 OpenClaw Actions");
       }
@@ -65,6 +70,11 @@ export default function OpenClawActionsPage() {
   }
 
   async function handleAgentHook() {
+    if (!selectedInstanceId) {
+      setError("請先建立並選擇 OpenClaw Instance。");
+      return;
+    }
+
     setBusyAction("agent");
     setError("");
     setMessage("");
@@ -90,6 +100,11 @@ export default function OpenClawActionsPage() {
   }
 
   async function handleWakeHook() {
+    if (!selectedInstanceId) {
+      setError("請先建立並選擇 OpenClaw Instance。");
+      return;
+    }
+
     setBusyAction("wake");
     setError("");
     setMessage("");
@@ -114,9 +129,11 @@ export default function OpenClawActionsPage() {
 
   return (
     <OpenClawPageShell
-      title="OpenClaw Actions"
-      description="Actions 頁目前以 `openclaw agent` CLI 模擬手動派發。Agent Hook 可直接測試 agent turn；Wake Hook 在這個 OpenClaw 版本暫不支援。"
+      title="Actions"
+      description="Actions 是 OpenClaw Control Center 內的 Admin Tools 分區，目前以 `openclaw agent` CLI 模擬手動派發；Wake Hook 仍維持提示態。"
       roles={ACTION_ROLES}
+      sectionGroup="Admin Tools"
+      sectionLabel="Actions"
     >
       <PixelCard title="共用派發上下文" eyebrow="Context">
         <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
@@ -124,6 +141,7 @@ export default function OpenClawActionsPage() {
             instances={instances}
             value={selectedInstanceId}
             onChange={setSelectedInstanceId}
+            disabled={!hasInstances || isPending}
           />
           <div className="grid gap-4">
             <div className="border-4 border-ink bg-white p-4 text-sm leading-7 text-slate-700">
@@ -211,7 +229,7 @@ export default function OpenClawActionsPage() {
             <button
               type="button"
               onClick={handleAgentHook}
-              disabled={busyAction === "agent" || !selectedInstanceId}
+              disabled={busyAction === "agent" || !canDispatch}
               className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
             >
               {busyAction === "agent" ? "派發中..." : "送出 Agent Hook"}

@@ -4,7 +4,6 @@ import { Suspense, useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { OpenClawInstancePicker } from "@/components/openclaw-instance-picker";
-import { PixelCard } from "@/components/pixel-card";
 import { RoleSquad } from "@/components/role-squad";
 import { StatusPill } from "@/components/status-pill";
 import { WorkflowEventTimeline } from "@/components/workflow-event-timeline";
@@ -78,7 +77,7 @@ function SearchWorkflowPageContent() {
   const [runs, setRuns] = useState<WorkflowRunResponse[]>([]);
   const [activeRun, setActiveRun] = useState<WorkflowRunResponse | null>(null);
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("選擇模式後送出查詢，這裡會即時顯示每個 agent 的工作狀態與處理鏈路。");
+  const [message, setMessage] = useState("等待啟動。");
   const [isPending, startTransition] = useTransition();
 
   useEffect(() => {
@@ -186,13 +185,13 @@ function SearchWorkflowPageContent() {
         setError("請先輸入搜索查詢。");
         return;
       }
-      setMessage("已送出搜索-分析-報告工作流，正在啟動搜索 agent。");
+      setMessage("已送出 Project Workflow。");
     } else {
       if (!webTopic.trim()) {
         setError("請先輸入搜尋內容 / 主題。");
         return;
       }
-      setMessage("已送出 Web Search + Ingest 工作流，正在理解搜尋目標並準備搜尋即入庫。");
+      setMessage("已送出 Web Search + Ingest。");
     }
 
     startTransition(async () => {
@@ -256,7 +255,7 @@ function SearchWorkflowPageContent() {
         setResultLimit
       });
       router.replace(`/search?runId=${runId}`);
-      setMessage("已切換到指定 workflow run。");
+      setMessage("已切換 workflow run。");
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "無法切換 workflow run");
     }
@@ -268,7 +267,7 @@ function SearchWorkflowPageContent() {
     }
 
     setError("");
-    setMessage("已收到接續要求，正在建立分析/報告流程。");
+    setMessage("正在建立分析/報告流程。");
 
     startTransition(async () => {
       try {
@@ -305,8 +304,8 @@ function SearchWorkflowPageContent() {
     setError("");
     setMessage(
       nextMode === "search_report"
-        ? "已切回搜索-分析-報告模式。"
-        : "已切到 Web Search + Ingest 模式，會搜尋高價值結果並自動沉澱入庫。"
+        ? "已切回 Project Workflow。"
+        : "已切到 Web Search + Ingest。"
     );
     router.replace("/search");
   }
@@ -314,251 +313,270 @@ function SearchWorkflowPageContent() {
   const workflowRoles = useMemo(() => buildWorkflowRoles(activeRun, workflowMode), [activeRun, workflowMode]);
   const activeModeDescription =
     workflowMode === "search_report"
-      ? "把既有專案索引交給三個 agent 串行完成搜索、分析、報告。"
-      : "先理解外網搜尋目標，再搜尋、過濾、入庫更新並格式化輸出結果。";
+      ? "搜索、分析、報告。"
+      : "理解、搜尋、過濾、入庫、輸出。";
 
   return (
-    <div className="grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]">
-      <RoleSquad roles={workflowRoles} />
-
-      <section className="space-y-5">
-        <PixelCard title="搜索工作台" eyebrow="Workflow">
-          <div className="flex flex-wrap gap-2">
-            <ModeButton
-              label="Project Workflow"
-              active={workflowMode === "search_report"}
-              description="搜索 / 分析 / 報告"
-              onClick={() => handleModeChange("search_report")}
-            />
-            <ModeButton
-              label="Web Search + Ingest"
-              active={workflowMode === "web_search"}
-              description="理解 / 搜尋 / 過濾 / 入庫 / 輸出"
-              onClick={() => handleModeChange("web_search")}
-            />
-          </div>
-
-          <div className="mt-4 grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)]">
-            <OpenClawInstancePicker instances={instances} value={selectedInstanceId} onChange={setSelectedInstanceId} />
-            <div className="border-4 border-ink bg-white px-4 py-3 text-sm text-slate-700">
-              <p className="font-black tracking-[0.08em]">{workflowMode === "search_report" ? "Project Workflow" : "Web Search + Ingest"}</p>
-              <p className="mt-2 leading-7">{activeModeDescription}</p>
-              {workflowMode === "web_search" ? (
-                <p className="mt-2 text-xs leading-6 text-slate-500">高價值搜尋來源會自動寫入知識庫，並優先合併到既有 source；找不到可合併來源時才會新建 source。</p>
-              ) : null}
+    <div className="space-y-5">
+      <section className="page-intro rounded-[1.75rem] px-5 py-5 md:px-6">
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
+          <div className="space-y-5">
+            <div className="space-y-3">
+              <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Workflow</p>
+              <div className="space-y-2">
+                <h1 className="pixel-title text-2xl font-black tracking-[0.06em] text-ink md:text-3xl">搜索工作台</h1>
+                <p className="max-w-3xl text-sm leading-6 text-slate-700">先啟動，再追蹤，再看結果。</p>
+              </div>
             </div>
-          </div>
 
-          {workflowMode === "search_report" ? (
-            <div className="mt-4 grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)_auto]">
-              <select
-                value={sourceId}
-                onChange={(event) => setSourceId(event.target.value)}
-                className="border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
-              >
-                <option value="">全部資料源</option>
-                {sources.map((source) => (
-                  <option key={source.id} value={source.id}>
-                    {source.name}
-                  </option>
-                ))}
-              </select>
-              <input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="輸入要交給搜索 agent 的查詢"
-                className="border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
+            <div className="flex flex-wrap gap-2">
+              <ModeButton
+                label="Project Workflow"
+                active={workflowMode === "search_report"}
+                description="搜索 / 分析 / 報告"
+                onClick={() => handleModeChange("search_report")}
               />
-              <button
-                type="button"
-                onClick={handleStartWorkflow}
-                disabled={!selectedInstanceId || !query.trim() || isPending}
-                className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
-              >
-                {isPending ? "啟動中..." : "啟動流程"}
-              </button>
+              <ModeButton
+                label="Web Search + Ingest"
+                active={workflowMode === "web_search"}
+                description="理解 / 搜尋 / 過濾 / 入庫 / 輸出"
+                onClick={() => handleModeChange("web_search")}
+              />
             </div>
-          ) : (
-            <div className="mt-4 space-y-4">
-              <div className="grid gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(0,0.75fr)]">
-                <textarea
-                  value={webTopic}
-                  onChange={(event) => setWebTopic(event.target.value)}
-                  placeholder="搜尋內容 / 主題"
-                  rows={3}
-                  className="border-4 border-ink bg-white px-4 py-3 text-sm leading-7 outline-none"
+
+            <div className="grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)]">
+              <OpenClawInstancePicker instances={instances} value={selectedInstanceId} onChange={setSelectedInstanceId} />
+              <div className="rounded-[1.25rem] border border-slate-200 bg-white/90 px-4 py-4 text-sm text-slate-700">
+                <p className="font-black tracking-[0.05em]">
+                  {workflowMode === "search_report" ? "Project Workflow" : "Web Search + Ingest"}
+                </p>
+                <p className="mt-2 leading-6">{activeModeDescription}</p>
+              </div>
+            </div>
+
+            {workflowMode === "search_report" ? (
+              <div className="grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)_auto]">
+                <select
+                  value={sourceId}
+                  onChange={(event) => setSourceId(event.target.value)}
+                  className="select-shell rounded-[1rem] px-4 py-3 text-sm"
+                >
+                  <option value="">全部資料源</option>
+                  {sources.map((source) => (
+                    <option key={source.id} value={source.id}>
+                      {source.name}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="輸入查詢"
+                  className="input-shell rounded-[1rem] px-4 py-3 text-sm"
                 />
-                <div className="grid gap-4 md:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={handleStartWorkflow}
+                  disabled={!selectedInstanceId || !query.trim() || isPending}
+                  className="pixel-button rounded-[1rem] bg-coral px-5 py-3 text-sm font-black tracking-[0.05em] text-white disabled:opacity-60"
+                >
+                  {isPending ? "啟動中..." : "啟動流程"}
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
                   <label className="space-y-2">
-                    <span className="text-[11px] font-black tracking-[0.12em] text-slate-500">回傳格式</span>
-                    <select
-                      value={webOutputFormat}
-                      onChange={(event) => setWebOutputFormat(event.target.value as WebSearchOutputFormat)}
-                      className="w-full border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
-                    >
-                      {WEB_OUTPUT_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="space-y-2">
-                    <span className="text-[11px] font-black tracking-[0.12em] text-slate-500">業務分類</span>
-                    <select
-                      value={businessType}
-                      onChange={(event) => setBusinessType((event.target.value || "") as BusinessType | "")}
-                      className="w-full border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
-                    >
-                      <option value="">自動判斷</option>
-                      {BUSINESS_TYPE_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="space-y-2">
-                    <span className="text-[11px] font-black tracking-[0.12em] text-slate-500">結果筆數</span>
-                    <select
-                      value={String(resultLimit)}
-                      onChange={(event) => setResultLimit(Number(event.target.value))}
-                      className="w-full border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
-                    >
-                      {[3, 5, 8, 10].map((limit) => (
-                        <option key={limit} value={limit}>
-                          {limit} 筆
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="flex items-center gap-3 border-4 border-ink bg-sand px-4 py-3">
-                    <input
-                      type="checkbox"
-                      checked={includeProjectSources}
-                      onChange={(event) => setIncludeProjectSources(event.target.checked)}
-                      className="h-4 w-4"
+                    <span className="field-label">搜尋內容 / 主題</span>
+                    <textarea
+                      value={webTopic}
+                      onChange={(event) => setWebTopic(event.target.value)}
+                      placeholder="輸入主題"
+                      rows={3}
+                      className="textarea-shell w-full rounded-[1rem] px-4 py-3 text-sm leading-7"
                     />
-                    <span className="text-sm font-black tracking-[0.08em]">合併專案索引結果</span>
                   </label>
-                  <button
-                    type="button"
-                    onClick={handleStartWorkflow}
-                    disabled={!selectedInstanceId || !webTopic.trim() || isPending}
-                    className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
-                  >
-                    {isPending ? "啟動中..." : "啟動 Web Search + Ingest"}
-                  </button>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="space-y-2">
+                      <span className="field-label">回傳格式</span>
+                      <select
+                        value={webOutputFormat}
+                        onChange={(event) => setWebOutputFormat(event.target.value as WebSearchOutputFormat)}
+                        className="select-shell w-full rounded-[1rem] px-4 py-3 text-sm"
+                      >
+                        {WEB_OUTPUT_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="space-y-2">
+                      <span className="field-label">業務分類</span>
+                      <select
+                        value={businessType}
+                        onChange={(event) => setBusinessType((event.target.value || "") as BusinessType | "")}
+                        className="select-shell w-full rounded-[1rem] px-4 py-3 text-sm"
+                      >
+                        <option value="">自動判斷</option>
+                        {BUSINESS_TYPE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="space-y-2">
+                      <span className="field-label">結果筆數</span>
+                      <select
+                        value={String(resultLimit)}
+                        onChange={(event) => setResultLimit(Number(event.target.value))}
+                        className="select-shell w-full rounded-[1rem] px-4 py-3 text-sm"
+                      >
+                        {[3, 5, 8, 10].map((limit) => (
+                          <option key={limit} value={limit}>
+                            {limit} 筆
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="flex items-center gap-3 rounded-[1rem] border border-slate-200 bg-white/80 px-4 py-3">
+                      <input
+                        type="checkbox"
+                        checked={includeProjectSources}
+                        onChange={(event) => setIncludeProjectSources(event.target.checked)}
+                        className="h-4 w-4"
+                      />
+                      <span className="text-sm font-black tracking-[0.05em]">合併專案索引結果</span>
+                    </label>
+                  </div>
                 </div>
-              </div>
 
-              <div className="grid gap-4 xl:grid-cols-3">
-                <WorkflowTextAreaField
-                  label="指定搜尋網址"
-                  value={targetUrlsText}
-                  onChange={setTargetUrlsText}
-                  placeholder="每行一個 URL"
-                />
-                <WorkflowTextAreaField
-                  label="指定搜尋網站"
-                  value={targetSitesText}
-                  onChange={setTargetSitesText}
-                  placeholder="每行一個網站名稱"
-                />
-                <WorkflowTextAreaField
-                  label="指定搜尋網域"
-                  value={targetDomainsText}
-                  onChange={setTargetDomainsText}
-                  placeholder="每行一個網域，例如 example.com"
-                />
-                <WorkflowTextAreaField
-                  label="搜尋關鍵字"
-                  value={keywordsText}
-                  onChange={setKeywordsText}
-                  placeholder="每行一個關鍵字"
-                />
-                <WorkflowTextAreaField
-                  label="必須包含"
-                  value={mustIncludeText}
-                  onChange={setMustIncludeText}
-                  placeholder="每行一個必要條件"
-                />
-                <WorkflowTextAreaField
-                  label="必須排除"
-                  value={mustExcludeText}
-                  onChange={setMustExcludeText}
-                  placeholder="每行一個排除條件"
-                />
-              </div>
+                <details data-testid="workflow-advanced-filters" className="rounded-[1.25rem] border border-slate-200 bg-white/75 p-4">
+                  <summary className="cursor-pointer text-sm font-black tracking-[0.05em] text-ink">進階條件</summary>
+                  <div className="mt-4 space-y-4">
+                    <div className="grid gap-4 xl:grid-cols-3">
+                      <WorkflowTextAreaField
+                        label="指定搜尋網址"
+                        value={targetUrlsText}
+                        onChange={setTargetUrlsText}
+                        placeholder="每行一個 URL"
+                      />
+                      <WorkflowTextAreaField
+                        label="指定搜尋網站"
+                        value={targetSitesText}
+                        onChange={setTargetSitesText}
+                        placeholder="每行一個網站"
+                      />
+                      <WorkflowTextAreaField
+                        label="指定搜尋網域"
+                        value={targetDomainsText}
+                        onChange={setTargetDomainsText}
+                        placeholder="每行一個網域"
+                      />
+                      <WorkflowTextAreaField
+                        label="搜尋關鍵字"
+                        value={keywordsText}
+                        onChange={setKeywordsText}
+                        placeholder="每行一個關鍵字"
+                      />
+                      <WorkflowTextAreaField
+                        label="必須包含"
+                        value={mustIncludeText}
+                        onChange={setMustIncludeText}
+                        placeholder="每行一個必要條件"
+                      />
+                      <WorkflowTextAreaField
+                        label="必須排除"
+                        value={mustExcludeText}
+                        onChange={setMustExcludeText}
+                        placeholder="每行一個排除條件"
+                      />
+                    </div>
 
-              <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_260px]">
-                <WorkflowTextAreaField
-                  label="需要重點整理的資訊"
-                  value={focusPointsText}
-                  onChange={setFocusPointsText}
-                  placeholder="例如：價格差異、風險、優缺點、官方說法"
-                />
-                <label className="space-y-2">
-                  <span className="text-[11px] font-black tracking-[0.12em] text-slate-500">專案資料源篩選</span>
-                  <select
-                    value={sourceId}
-                    onChange={(event) => setSourceId(event.target.value)}
-                    disabled={!includeProjectSources}
-                    className="w-full border-4 border-ink bg-white px-4 py-3 text-sm outline-none disabled:bg-slate-100"
-                  >
-                    <option value="">全部資料源</option>
-                    {sources.map((source) => (
-                      <option key={source.id} value={source.id}>
-                        {source.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_260px]">
+                      <WorkflowTextAreaField
+                        label="需要重點整理的資訊"
+                        value={focusPointsText}
+                        onChange={setFocusPointsText}
+                        placeholder="例如：價格、風險、優缺點"
+                      />
+                      <label className="space-y-2">
+                        <span className="field-label">專案資料源篩選</span>
+                        <select
+                          value={sourceId}
+                          onChange={(event) => setSourceId(event.target.value)}
+                          disabled={!includeProjectSources}
+                          className="select-shell w-full rounded-[1rem] px-4 py-3 text-sm disabled:bg-slate-100"
+                        >
+                          <option value="">全部資料源</option>
+                          {sources.map((source) => (
+                            <option key={source.id} value={source.id}>
+                              {source.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                  </div>
+                </details>
+
+                <button
+                  type="button"
+                  onClick={handleStartWorkflow}
+                  disabled={!selectedInstanceId || !webTopic.trim() || isPending}
+                  className="pixel-button rounded-[1rem] bg-coral px-5 py-3 text-sm font-black tracking-[0.05em] text-white disabled:opacity-60"
+                >
+                  {isPending ? "啟動中..." : "啟動 Web Search + Ingest"}
+                </button>
               </div>
+            )}
+
+            <div className="status-strip rounded-[1.25rem] px-4 py-4 text-sm leading-6 text-slate-700">
+              {error ? <span className="text-coral">{error}</span> : isPending ? "處理中..." : message}
             </div>
-          )}
+          </div>
 
-          <div className="mt-4 grid gap-4 xl:grid-cols-[1fr_280px]">
-            <div className="border-4 border-ink bg-white p-4 text-sm leading-7 text-slate-700">
-              {error ? <span className="text-coral">{error}</span> : message}
-            </div>
-            <div className="border-4 border-ink bg-sand p-4">
+          <div className="space-y-4">
+            <div className="card-muted rounded-[1.5rem] p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <p className="text-[11px] font-black tracking-[0.12em] text-slate-500">整體進度</p>
-                  <p className="mt-1 text-lg font-black">{activeRun?.overall_progress_percent ?? 0}%</p>
+                  <p className="mt-1 text-2xl font-black text-ink">{activeRun?.overall_progress_percent ?? 0}%</p>
                 </div>
                 <StatusPill status={activeRun?.status ?? "pending"} />
               </div>
-              <div className="mt-3 h-4 border-2 border-ink bg-slate-100">
+              <div className="mt-4 h-3 overflow-hidden rounded-full bg-slate-200">
                 <div
-                  className="h-full bg-teal transition-[width]"
+                  className="h-full rounded-full bg-teal transition-[width]"
                   style={{ width: `${Math.max(0, Math.min(100, activeRun?.overall_progress_percent ?? 0))}%` }}
                 />
               </div>
               <p className="mt-3 text-sm leading-6 text-slate-700">
                 {activeRun
                   ? `目前進行到 ${activeRun.current_stage ?? "等待啟動"}，處理 agent：${activeRun.active_agent_id ?? "尚未指派"}`
-                  : "送出查詢後，這裡會顯示目前進行到哪一步。"}
+                  : "尚未啟動。"}
               </p>
             </div>
+
+            <RoleSquad roles={workflowRoles} mode="summary" />
           </div>
-        </PixelCard>
-
-        <WorkflowStageBoard run={activeRun} />
-
-        <div className="grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)]">
-          <WorkflowRunList runs={runs} activeRunId={activeRun?.id} onSelect={handleSelectRun} />
-          <WorkflowEventTimeline events={activeRun?.events ?? []} />
         </div>
-
-        <WorkflowReportPanel
-          run={activeRun}
-          onExportMarkdown={handleExportMarkdown}
-          onContinueToReport={activeRun?.workflow_type === "web_search" && activeRun.status === "completed" ? handleContinueToReport : undefined}
-          continueDisabled={isPending}
-        />
       </section>
+
+      <WorkflowStageBoard run={activeRun} />
+
+      <div className="grid gap-5 xl:grid-cols-[340px_minmax(0,1fr)]">
+        <WorkflowRunList runs={runs} activeRunId={activeRun?.id} onSelect={handleSelectRun} />
+        <WorkflowEventTimeline events={activeRun?.events ?? []} />
+      </div>
+
+      <WorkflowReportPanel
+        run={activeRun}
+        onExportMarkdown={handleExportMarkdown}
+        onContinueToReport={activeRun?.workflow_type === "web_search" && activeRun.status === "completed" ? handleContinueToReport : undefined}
+        continueDisabled={isPending}
+      />
     </div>
   );
 }
@@ -692,9 +710,13 @@ function ModeButton({
     <button
       type="button"
       onClick={onClick}
-      className={`border-4 border-ink px-4 py-3 text-left transition ${active ? "bg-ink text-sand" : "bg-white text-ink"}`}
+      className={`rounded-[1rem] border px-4 py-3 text-left transition ${
+        active
+          ? "border-ink bg-ink text-sand shadow-[0_16px_32px_rgba(17,24,39,0.12)]"
+          : "border-slate-200 bg-white/84 text-ink hover:border-slate-300 hover:bg-white"
+      }`}
     >
-      <p className="text-sm font-black tracking-[0.08em]">{label}</p>
+      <p className="text-sm font-black tracking-[0.05em]">{label}</p>
       <p className={`mt-1 text-xs ${active ? "text-sand/80" : "text-slate-500"}`}>{description}</p>
     </button>
   );
@@ -713,13 +735,13 @@ function WorkflowTextAreaField({
 }) {
   return (
     <label className="space-y-2">
-      <span className="text-[11px] font-black tracking-[0.12em] text-slate-500">{label}</span>
+      <span className="field-label">{label}</span>
       <textarea
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         rows={4}
-        className="w-full border-4 border-ink bg-white px-4 py-3 text-sm leading-7 outline-none"
+        className="textarea-shell w-full rounded-[1rem] px-4 py-3 text-sm leading-7"
       />
     </label>
   );
@@ -727,7 +749,7 @@ function WorkflowTextAreaField({
 
 export default function SearchPage() {
   return (
-    <Suspense fallback={<div className="pixel-panel rounded-none p-6 text-sm text-slate-600">正在載入工作流頁面...</div>}>
+    <Suspense fallback={<div className="status-strip rounded-[1.25rem] p-6 text-sm text-slate-600">正在載入工作流頁面...</div>}>
       <SearchWorkflowPageContent />
     </Suspense>
   );

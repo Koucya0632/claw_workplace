@@ -47,10 +47,20 @@ class WorkflowWebSearchCreateRequest(BaseModel):
 
 class WorkflowNewsBriefCreateRequest(BaseModel):
     instance_id: str
+    trigger_source: Literal["manual", "cron"] = "manual"
+    scheduled_date: Optional[str] = None
+    cron_job_id: Optional[str] = None
+    cron_job_name: Optional[str] = None
+    cron_run_id: Optional[str] = None
 
 
 class WorkflowSystemInspectionCreateRequest(BaseModel):
     instance_id: str
+    trigger_source: Literal["manual", "cron"] = "manual"
+    scheduled_date: Optional[str] = None
+    cron_job_id: Optional[str] = None
+    cron_job_name: Optional[str] = None
+    cron_run_id: Optional[str] = None
 
 
 class WorkflowDevelopmentExecutionCreateRequest(BaseModel):
@@ -58,6 +68,9 @@ class WorkflowDevelopmentExecutionCreateRequest(BaseModel):
     task_name: str
     problem_background: str
     goal: str
+    trigger_source: Literal["manual", "system_inspection_handoff"] = "manual"
+    continued_from_run_id: Optional[str] = None
+    origin_workflow_type: Optional[Literal["system_inspection"]] = None
     constraints: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
     context: str = ""
@@ -279,6 +292,9 @@ class WorkflowSystemInspectionVersionOutput(BaseModel):
     current_version: str
     latest_version: Optional[str] = None
     latest_version_status: str = "unknown"
+    update_available: Optional[bool] = None
+    channel_label: Optional[str] = None
+    version_source: Literal["openclaw_cli_update", "official_release_fallback", "unknown"] = "unknown"
     version_gap: str = ""
     release_summary: list[str] = Field(default_factory=list)
     breaking_changes: list[str] = Field(default_factory=list)
@@ -339,6 +355,9 @@ class WorkflowSystemInspectionReportPayload(BaseModel):
     delivery_status: str = "pending"
     delivery_target: Optional[str] = None
     delivery_error: Optional[str] = None
+    repair_workflow_created: bool = False
+    repair_workflow_run_id: Optional[str] = None
+    repair_workflow_reason: Optional[str] = None
 
 
 class WorkflowSystemInspectionReportDraft(BaseModel):
@@ -433,6 +452,11 @@ class WorkflowDevelopmentExecutionReportPayload(BaseModel):
     test_results: list[str] = Field(default_factory=list)
     risks_and_todos: list[str] = Field(default_factory=list)
     final_summary: str
+    delivery_status: str = "pending"
+    delivery_target: Optional[str] = None
+    delivery_error: Optional[str] = None
+    delivery_source: Literal["development_config", "runtime_route", "none"] = "none"
+    delivery_reason: Optional[str] = None
 
 
 class WorkflowStageRun(BaseModel):

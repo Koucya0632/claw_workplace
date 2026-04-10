@@ -1,0 +1,3957 @@
+import { randomUUID } from "node:crypto";
+import type { ToolClient } from "../clients/tool-client";
+import { createToolClient } from "../clients/factory";
+import {
+  HALL_RUNTIME_EXECUTION_CHAIN_ENABLED,
+  HALL_RUNTIME_EXECUTION_MAX_TURNS,
+} from "../config";
+import {
+  appendChatMessage,
+  createChatRoom,
+  deleteChatRoom,
+  getChatRoom,
+  getChatRoomByTask,
+  loadChatRoomStore,
+} from "./chat-store";
+import {
+  acquireHallExecutionLock,
+  assertHallExecutionAllowed,
+  releaseHallExecutionLock,
+} from "./hall-execution-lock";
+import { buildStructuredHandoffPacket, summarizeStructuredHandoff, type CreateStructuredHandoffInput } from "./hall-handoff";
+import { resolveHallMentionTargets } from "./hall-mention-router";
+import { pickPrimaryParticipantByRole, resolveHallParticipantsFromRoster } from "./hall-role-resolver";
+import {
+  abortHallDraftReply,
+  abortHallDraftRepliesForTask,
+  beginHallDraftReply,
+  completeHallDraftReply,
+  isHallDraftCanceled,
+  streamHallDraftReply,
+} from "./collaboration-stream";
+import { inferHallDiscussionDomainFromText, type HallDiscussionDomain } from "./hall-discussion-domain";
+import {
+  buildDiscussionParticipantQueue,
+  closeDiscussionCycle,
+  coerceTaskStage,
+  markDiscussionSpeakerComplete,
+  openDiscussionCycle,
+  resolveDefaultSpeakerForStage,
+  resolveNextDiscussionSpeaker,
+} from "./hall-speaker-policy";
+import {
+  DEFAULT_COLLABORATION_HALL_ID,
+  CollaborationHallStoreValidationError,
+  archiveHallTaskCard,
+  appendHallMessage,
+  createHallTaskCard,
+  deleteHallMessagesForTaskCard,
+  deleteHallTaskCard,
+  ensureDefaultCollaborationHall,
+  getHallTaskCard,
+  getHallTaskCardByTask,
+  listHallMessages,
+  listHallTaskCards,
+  loadCollaborationHallMessageStore,
+  loadCollaborationHallStore,
+  loadCollaborationTaskCardStore,
+  saveCollaborationHallMessageStore,
+  saveCollaborationHallStore,
+  updateHallTaskCard,
+} from "./collaboration-hall-store";
+import {
+  buildCollaborationHallSummary,
+  buildHallTaskSummary,
+  upsertCollaborationHallSummary,
+  upsertHallTaskSummary,
+} from "./collaboration-hall-summary-store";
+import { loadBestEffortAgentRoster } from "./agent-roster";
+import {
+  canDispatchHallToRuntime,
+  dispatchHallRuntimeTurn,
+  type HallRuntimeChainDirective,
+  type HallRuntimeDispatchResult,
+} from "./hall-runtime-dispatch";
+import { appendOperationAudit } from "./operation-audit";
+import { loadProjectStore, saveProjectStore } from "./project-store";
+import { readRoomDetail, recordRoomHandoff, submitRoomReview } from "./room-orchestrator";
+import { createTask, deleteTask, loadTaskStore, patchTask } from "./task-store";
+import { publishTaskRoomBridgeEvent } from "./task-room-bridge";
+import type {
+  ChatMessage,
+  CollaborationHall,
+  CollaborationHallSummary,
+  HallExecutionItem,
+  HallMessage,
+  HallParticipant,
+  HallSemanticRole,
+  HallTaskCard,
+  HallTaskSummary,
+  MessageKind,
+  ProjectTask,
+  RoomParticipantRole,
+  StructuredHandoffPacket,
+  TaskArtifact,
+  TaskState,
+} from "../types";
+
+export const DEFAULT_COLLABORATION_HALL_PROJECT_ID = "collaboration-hall";
+
+type HallOperatorIntent = "greeting" | "light_chat" | "discussion_request" | "task_request";
+type HallResponseLanguage = "zh" | "en";
+
+export interface HallReadResult {
+  hall: CollaborationHall;
+  hallSummary: CollaborationHallSummary;
+  participants: HallParticipant[];
+  messages: HallMessage[];
+  taskCards: HallTaskCard[];
+  taskSummaries: HallTaskSummary[];
+}
+
+export interface HallTaskDetailResult {
+  hall: CollaborationHall;
+  hallSummary: CollaborationHallSummary;
+  taskCard: HallTaskCard;
+  taskSummary: HallTaskSummary;
+  task?: ProjectTask;
+  messages: HallMessage[];
+}
+
+export interface CreateHallTaskInput {
+  hallId?: string;
+  projectId?: string;
+  taskId?: string;
+  title?: string;
+  content: string;
+  authorParticipantId?: string;
+  authorLabel?: string;
+}
+
+export interface HallMessageInput {
+  hallId?: string;
+  taskCardId?: string;
+  projectId?: string;
+  taskId?: string;
+  content: string;
+  authorParticipantId?: string;
+  authorLabel?: string;
+}
+
+export interface HallMutationResult {
+  hall: CollaborationHall;
+  hallSummary: CollaborationHallSummary;
+  taskCard?: HallTaskCard;
+  taskSummary?: HallTaskSummary;
+  task?: ProjectTask;
+  roomId?: string;
+  message?: HallMessage;
+  generatedMessages: HallMessage[];
+}
+
+export interface AssignHallTaskInput {
+  taskCardId: string;
+  ownerParticipantId?: string;
+  note?: string;
+}
+
+export interface SetHallExecutionOrderInput {
+  taskCardId: string;
+  participantIds: string[];
+  executionItems?: HallExecutionItem[];
+  note?: string;
+}
+
+export interface ReviewHallTaskInput {
+  taskCardId: string;
+  outcome: "approved" | "rejected";
+  note?: string;
+  blockTask?: boolean;
+}
+
+export interface StopHallTaskInput {
+  taskCardId: string;
+  note?: string;
+}
+
+export interface HallHandoffInput {
+  taskCardId: string;
+  fromParticipantId: string;
+  toParticipantId: string;
+  handoff: CreateStructuredHandoffInput;
+}
+
+export interface ArchiveHallTaskInput {
+  taskCardId: string;
+  archivedByParticipantId?: string;
+  archivedByLabel?: string;
+}
+
+export interface DeleteHallTaskInput {
+  taskCardId: string;
+}
+
+export interface HallOrchestratorRuntimeOptions {
+  toolClient?: ToolClient;
+  skipDiscussion?: boolean;
+}
+
+interface HallReadOptions {
+  persist?: boolean;
+}
+
+const pendingHallBackgroundWork = new Set<Promise<void>>();
+
+export async function waitForHallBackgroundWork(): Promise<void> {
+  const pending = [...pendingHallBackgroundWork];
+  if (pending.length === 0) return;
+  await Promise.allSettled(pending);
+}
+
+export async function readCollaborationHall(hallId = DEFAULT_COLLABORATION_HALL_ID): Promise<HallReadResult> {
+  const hall = await requireHall(hallId, { persist: false });
+  const [messageStore, taskCardStore] = await Promise.all([
+    loadCollaborationHallMessageStore(),
+    loadCollaborationTaskCardStore(),
+  ]);
+  const allTaskCards = listHallTaskCards(taskCardStore, { hallId, includeArchived: true });
+  const taskCards = allTaskCards.filter((card) => !card.archivedAt);
+  const visibleTaskCardIds = new Set(taskCards.map((card) => card.taskCardId));
+  const messages = await reconcileHallMessages(hallId, messageStore, allTaskCards, { persist: false });
+  const visibleMessages = messages.filter((message) => !message.taskCardId || visibleTaskCardIds.has(message.taskCardId));
+  const reconciledHall = await reconcileHallState(hall, messages, taskCards, { persist: false });
+  const hallSummary = buildCollaborationHallSummary(reconciledHall, visibleMessages, taskCards);
+  const taskSummaries = taskCards.map((card) => buildHallTaskSummary(card, messages));
+  return {
+    hall: reconciledHall,
+    hallSummary,
+    participants: reconciledHall.participants,
+    messages,
+    taskCards,
+    taskSummaries,
+  };
+}
+
+async function reconcileHallMessages(
+  hallId: string,
+  messageStore: Awaited<ReturnType<typeof loadCollaborationHallMessageStore>>,
+  taskCards: HallTaskCard[],
+  options: HallReadOptions = {},
+): Promise<HallMessage[]> {
+  const liveTaskCardIds = new Set(taskCards.map((taskCard) => taskCard.taskCardId));
+  const orphanedMessageIds = new Set(
+    messageStore.messages
+      .filter((message) => message.hallId === hallId)
+      .filter((message) => Boolean(message.taskCardId) && !liveTaskCardIds.has(message.taskCardId as string))
+      .map((message) => message.messageId),
+  );
+  if (orphanedMessageIds.size > 0) {
+    const filteredMessages = messageStore.messages.filter((message) => !orphanedMessageIds.has(message.messageId));
+    if (options.persist !== false) {
+      messageStore.messages = filteredMessages;
+      messageStore.updatedAt = new Date().toISOString();
+      await saveCollaborationHallMessageStore(messageStore);
+    }
+    return filteredMessages
+      .filter((message) => message.hallId === hallId)
+      .sort(compareHallTimelineMessages);
+  }
+  return listHallMessages(messageStore, { hallId });
+}
+
+async function reconcileHallState(
+  hall: CollaborationHall,
+  messages: HallMessage[],
+  taskCards: HallTaskCard[],
+  options: HallReadOptions = {},
+): Promise<CollaborationHall> {
+  const nextMessageIds = messages.map((message) => message.messageId);
+  const nextTaskCardIds = taskCards.map((taskCard) => taskCard.taskCardId);
+  const nextLastMessageId = nextMessageIds.at(-1) ?? null;
+  const nextLatestMessageAt = messages.at(-1)?.createdAt ?? hall.latestMessageAt;
+  const sameMessageIds =
+    hall.messageIds.length === nextMessageIds.length
+    && hall.messageIds.every((messageId, index) => messageId === nextMessageIds[index]);
+  const sameTaskCardIds =
+    hall.taskCardIds.length === nextTaskCardIds.length
+    && hall.taskCardIds.every((taskCardId, index) => taskCardId === nextTaskCardIds[index]);
+  const unchanged =
+    sameMessageIds
+    && sameTaskCardIds
+    && hall.lastMessageId === nextLastMessageId
+    && hall.latestMessageAt === nextLatestMessageAt;
+  if (unchanged) return hall;
+
+  const nextHall: CollaborationHall = {
+    ...hall,
+    messageIds: nextMessageIds,
+    taskCardIds: nextTaskCardIds,
+    lastMessageId: nextLastMessageId,
+    latestMessageAt: nextLatestMessageAt,
+    updatedAt: new Date().toISOString(),
+  };
+  if (options.persist === false) {
+    return nextHall;
+  }
+  const hallStore = await loadCollaborationHallStore();
+  const hallIndex = hallStore.halls.findIndex((item) => item.hallId === hall.hallId);
+  if (hallIndex >= 0) {
+    hallStore.halls[hallIndex] = nextHall;
+    hallStore.updatedAt = nextHall.updatedAt;
+    await saveCollaborationHallStore(hallStore);
+  }
+  return nextHall;
+}
+
+export async function readCollaborationHallTaskDetail(
+  taskCardId: string,
+  options: HallOrchestratorRuntimeOptions = {},
+): Promise<HallTaskDetailResult> {
+  const { hall, hallSummary, messages } = await readCollaborationHall();
+  const taskCardStore = await loadCollaborationTaskCardStore();
+  const taskCard = getHallTaskCard(taskCardStore, taskCardId);
+  if (!taskCard) {
+    throw new CollaborationHallStoreValidationError(`task card '${taskCardId}' was not found.`, ["taskCardId"], 404);
+  }
+  const taskStore = await loadTaskStore();
+  const task = taskStore.tasks.find((item) => item.projectId === taskCard.projectId && item.taskId === taskCard.taskId);
+  const detailMessages = await buildHallTaskDetailMessages(taskCard, messages, hall.participants);
+  const taskSummary = buildHallTaskSummary(taskCard, detailMessages);
+  return {
+    hall,
+    hallSummary,
+    taskCard,
+    taskSummary,
+    task,
+    messages: detailMessages,
+  };
+}
+
+async function buildHallTaskDetailMessages(
+  taskCard: HallTaskCard,
+  hallMessages: HallMessage[],
+  participants: HallParticipant[],
+): Promise<HallMessage[]> {
+  const scopedHallMessages = hallMessages.filter(
+    (message) =>
+      (message.taskCardId === taskCard.taskCardId || message.taskId === taskCard.taskId)
+      && shouldDisplayHallTimelineMessage(message),
+  );
+  if (!taskCard.roomId) return scopedHallMessages;
+  try {
+    const linkedRoomDetail = await readRoomDetail(taskCard.roomId);
+    const roomMessages = linkedRoomDetail.messages
+      .filter((message) => shouldMergeLinkedRoomMessage(message))
+      .map((message) => mapRoomMessageToHallMessage(taskCard, participants, message));
+    return mergeHallTaskMessages(scopedHallMessages, roomMessages);
+  } catch {
+    return scopedHallMessages;
+  }
+}
+
+function shouldDisplayHallTimelineMessage(message: Pick<HallMessage, "kind" | "content">): boolean {
+  if (message.kind !== "handoff") return true;
+  return !isLegacyLinkedRoomHandoffMessage(message.content);
+}
+
+function shouldMergeLinkedRoomMessage(message: ChatMessage): boolean {
+  if (message.kind !== "handoff") return true;
+  return !isLegacyLinkedRoomHandoffMessage(message.content);
+}
+
+function isLegacyLinkedRoomHandoffMessage(content: string): boolean {
+  const normalized = content.trim();
+  return /^(Operator|Planner|Coder|Reviewer|Manager) handed the room to (Operator|Planner|Coder|Reviewer|Manager)\.$/.test(normalized);
+}
+
+function mapRoomMessageToHallMessage(
+  taskCard: HallTaskCard,
+  participants: HallParticipant[],
+  message: ChatMessage,
+): HallMessage {
+  const participant = resolveHallParticipantForRoomMessage(participants, message);
+  const mentionTargets = mapRoomMentionsToHallMentionTargets(participants, message.mentions);
+  return {
+    hallId: taskCard.hallId,
+    messageId: `linked-room:${message.messageId}`,
+    kind: mapRoomKindToHallKind(message.kind),
+    authorParticipantId: participant?.participantId ?? fallbackHallParticipantIdForRoomMessage(message),
+    authorLabel: participant?.displayName ?? message.authorLabel,
+    authorSemanticRole: participant?.semanticRole ?? mapRoomRoleToHallSemanticRole(message.authorRole),
+    content: message.content,
+    targetParticipantIds: mentionTargets.map((item) => item.participantId),
+    mentionTargets,
+    projectId: taskCard.projectId,
+    taskId: taskCard.taskId,
+    taskCardId: taskCard.taskCardId,
+    roomId: taskCard.roomId,
+    payload: {
+      projectId: taskCard.projectId,
+      taskId: taskCard.taskId,
+      taskCardId: taskCard.taskCardId,
+      roomId: taskCard.roomId,
+      proposal: message.payload?.proposal,
+      decision: message.payload?.decision,
+      doneWhen: message.payload?.doneWhen,
+      reviewOutcome: message.payload?.reviewOutcome,
+      taskStatus: message.payload?.taskStatus,
+      status: message.payload?.status,
+      sessionKey: message.payload?.sessionKey,
+      sourceSessionKey: message.payload?.sourceSessionKey,
+      sourceTool: message.payload?.sourceTool,
+    },
+    createdAt: message.createdAt,
+  };
+}
+
+function mapRoomKindToHallKind(kind: MessageKind): HallMessage["kind"] {
+  switch (kind) {
+    case "proposal":
+    case "decision":
+    case "handoff":
+    case "status":
+    case "result":
+      return kind;
+    default:
+      return "chat";
+  }
+}
+
+function mapRoomRoleToHallSemanticRole(role: RoomParticipantRole): HallSemanticRole {
+  switch (role) {
+    case "planner":
+      return "planner";
+    case "reviewer":
+      return "reviewer";
+    case "manager":
+      return "manager";
+    case "human":
+      return "generalist";
+    default:
+      return "coder";
+  }
+}
+
+function resolveHallParticipantForRoomMessage(
+  participants: HallParticipant[],
+  message: ChatMessage,
+): HallParticipant | undefined {
+  const normalizedAuthor = message.authorLabel.trim().toLowerCase();
+  if (normalizedAuthor.length > 0) {
+    const byName = participants.find((participant) => {
+      if (participant.displayName.trim().toLowerCase() === normalizedAuthor) return true;
+      return participant.aliases.some((alias) => alias.trim().toLowerCase() === normalizedAuthor);
+    });
+    if (byName) return byName;
+  }
+  if (message.authorRole === "human") {
+    return participants.find((participant) => participant.isHuman);
+  }
+  const semanticRole = mapRoomRoleToHallSemanticRole(message.authorRole);
+  return participants.find((participant) => participant.active !== false && participant.semanticRole === semanticRole);
+}
+
+function fallbackHallParticipantIdForRoomMessage(message: ChatMessage): string {
+  if (message.authorRole === "human") return "operator";
+  const author = message.authorLabel.trim().toLowerCase().replace(/[^a-z0-9._:-]+/g, "-").replace(/^-+|-+$/g, "");
+  return author ? `linked-room:${author}` : `linked-room:${message.authorRole}`;
+}
+
+function mapRoomMentionsToHallMentionTargets(
+  participants: HallParticipant[],
+  mentions: RoomParticipantRole[],
+) {
+  return mentions
+    .map((role) => {
+      if (role === "human") {
+        const human = participants.find((participant) => participant.isHuman);
+        return human
+          ? {
+              raw: "@operator",
+              participantId: human.participantId,
+              displayName: human.displayName,
+              semanticRole: human.semanticRole,
+            }
+          : undefined;
+      }
+      const semanticRole = mapRoomRoleToHallSemanticRole(role);
+      const participant = participants.find((item) => item.active !== false && item.semanticRole === semanticRole);
+      return participant
+        ? {
+            raw: `@${participant.displayName}`,
+            participantId: participant.participantId,
+            displayName: participant.displayName,
+            semanticRole: participant.semanticRole,
+          }
+        : undefined;
+    })
+    .filter((item): item is HallMessage["mentionTargets"][number] => Boolean(item));
+}
+
+function mergeHallTaskMessages(primary: HallMessage[], secondary: HallMessage[]): HallMessage[] {
+  const merged = [...primary];
+  for (const message of secondary) {
+    if (merged.some((existing) => areEquivalentHallMessages(existing, message))) continue;
+    merged.push(message);
+  }
+  return merged.sort(compareHallTimelineMessages);
+}
+
+function areEquivalentHallMessages(a: HallMessage, b: HallMessage): boolean {
+  if (a.kind !== b.kind) return false;
+  if ((a.taskCardId ?? "") !== (b.taskCardId ?? "")) return false;
+  if (normalizeHallAuthorLabel(a.authorLabel) !== normalizeHallAuthorLabel(b.authorLabel)) return false;
+  if (normalizeHallMessageContent(a.content) !== normalizeHallMessageContent(b.content)) return false;
+  const delta = Math.abs(Date.parse(a.createdAt || "") - Date.parse(b.createdAt || ""));
+  return delta <= 5_000;
+}
+
+function normalizeHallAuthorLabel(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeHallMessageContent(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function compareHallTimelineMessages(left: HallMessage, right: HallMessage): number {
+  const leftTime = Date.parse(left.createdAt || "");
+  const rightTime = Date.parse(right.createdAt || "");
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return leftTime - rightTime;
+  }
+  return left.messageId.localeCompare(right.messageId);
+}
+
+function shouldRouteOperatorMessageBackToDiscussion(
+  taskCard: HallTaskCard,
+  content: string,
+  mentionTargets: { participantId: string }[],
+): boolean {
+  if (taskCard.stage === "discussion" || taskCard.stage === "blocked") return false;
+  const intent = classifyHallOperatorIntent(content);
+  if (requestsDiscussionContinuation(content)) return true;
+  if (requestsExecutionContinuation(content)) return false;
+  if (mentionTargets.length > 0) return true;
+  return intent === "discussion_request" && /[?？]/.test(content);
+}
+
+function matchesExplicitHallMentionForParticipant(
+  content: string,
+  participant: HallParticipant | undefined,
+): boolean {
+  if (!participant) return false;
+  const candidates = [
+    participant.participantId,
+    participant.displayName,
+    ...(Array.isArray(participant.aliases) ? participant.aliases : []),
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  if (candidates.length === 0) return false;
+  return candidates.some((candidate) => {
+    const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[\\s(])@${escaped}(?=$|[\\s),.!?;:])`, "i").test(content);
+  });
+}
+
+async function reopenHallTaskToDiscussion(
+  taskCard: HallTaskCard,
+  hall: CollaborationHall,
+  releaseReason: string,
+): Promise<HallTaskCard> {
+  const reopened = releaseHallExecutionLock(taskCard, releaseReason);
+  const currentParticipantId = reopened.currentExecutionItem?.participantId?.trim()
+    || reopened.currentOwnerParticipantId?.trim()
+    || "";
+  const nextExecutionOrder = sanitizeExecutionOrder(
+    hall.participants,
+    [
+      currentParticipantId,
+      ...reopened.plannedExecutionOrder,
+    ].filter(Boolean),
+  );
+  const nextExecutionItems = deriveExecutionItemsFromOrder(
+    hall.participants,
+    nextExecutionOrder,
+    reopened,
+    {
+      existingItems: [
+        ...(reopened.currentExecutionItem ? [reopened.currentExecutionItem] : []),
+        ...reopened.plannedExecutionItems,
+      ],
+      primaryDoneWhen: reopened.doneWhen,
+    },
+  );
+  return (
+    await updateHallTaskCard({
+      taskCardId: reopened.taskCardId,
+      stage: "discussion",
+      status: "todo",
+      currentOwnerParticipantId: null,
+      currentOwnerLabel: null,
+      currentExecutionItem: null,
+      executionLock: reopened.executionLock,
+      plannedExecutionOrder: nextExecutionOrder,
+      plannedExecutionItems: nextExecutionItems,
+    })
+  ).taskCard;
+}
+
+export async function createHallTaskFromOperatorRequest(
+  input: CreateHallTaskInput,
+  options: HallOrchestratorRuntimeOptions = {},
+): Promise<HallMutationResult> {
+  const context = await ensureHallContext(input.hallId);
+  const authorParticipantId = input.authorParticipantId?.trim() || "operator";
+  const authorLabel = input.authorLabel?.trim() || "Operator";
+  const projectId = normalizeTaskKey(input.projectId) || DEFAULT_COLLABORATION_HALL_PROJECT_ID;
+  const taskId = normalizeTaskKey(input.taskId) || buildTaskId(input.title ?? input.content);
+  const title = deriveTaskTitle(input.title ?? input.content);
+  const description = input.content.trim();
+  const mentionRouting = resolveHallMentionTargets(input.content, context.hall.participants);
+  const directedMentionParticipantIds = mentionRouting.broadcastAll
+    ? []
+    : mentionRouting.targets.map((target) => target.participantId).filter(Boolean);
+
+  await ensureHallProject(projectId);
+
+  const createdTask = await createTask({
+    projectId,
+    taskId,
+    title,
+    status: "todo",
+    owner: authorLabel,
+    definitionOfDone: [],
+    sessionKeys: [],
+  });
+
+  const roomStore = await loadChatRoomStore();
+  const existingRoom = getChatRoomByTask(roomStore, projectId, taskId);
+  const room = existingRoom ?? (
+    await createChatRoom({
+      projectId,
+      taskId,
+      title,
+    })
+  ).room;
+  const patchedTask = await patchTask({
+    taskId,
+    projectId,
+    roomId: room.roomId,
+  });
+
+  let taskCard = (
+    await createHallTaskCard({
+      hallId: context.hall.hallId,
+      projectId,
+      taskId,
+      roomId: room.roomId,
+      title,
+      description,
+      createdByParticipantId: authorParticipantId,
+      currentOwnerParticipantId: undefined,
+      currentOwnerLabel: undefined,
+      mentionedParticipantIds: directedMentionParticipantIds,
+      blockers: [],
+      requiresInputFrom: [],
+      sessionKeys: [],
+    })
+  ).taskCard;
+  taskCard = openDiscussionCycle(
+    taskCard,
+    authorParticipantId,
+    context.hall.participants,
+    buildDynamicDiscussionParticipantQueue(context.hall, taskCard, patchedTask.task, input.content),
+  );
+  taskCard = (
+    await updateHallTaskCard({
+      taskCardId: taskCard.taskCardId,
+      discussionCycle: taskCard.discussionCycle,
+      stage: "discussion",
+      roomId: room.roomId,
+    })
+  ).taskCard;
+
+  const initialMessage = (
+    await appendHallMessage({
+      hallId: context.hall.hallId,
+      kind: "task",
+      authorParticipantId,
+      authorLabel,
+      content: description,
+      targetParticipantIds: directedMentionParticipantIds,
+      mentionTargets: mentionRouting.targets,
+      projectId,
+      taskId,
+      taskCardId: taskCard.taskCardId,
+      roomId: room.roomId,
+      payload: {
+        projectId,
+        taskId,
+        taskCardId: taskCard.taskCardId,
+        roomId: room.roomId,
+        taskStage: taskCard.stage,
+        taskStatus: patchedTask.task.status,
+      },
+    })
+  ).message;
+  const createdRoom = await requireLinkedRoom(room.roomId);
+  await publishTaskRoomBridgeEvent({
+    type: "room_created",
+    room: createdRoom,
+    task: patchedTask.task,
+    note: "Room auto-created from collaboration hall task creation.",
+  });
+
+  await appendOperationAudit({
+    action: "hall_task_create",
+    source: "api",
+    ok: true,
+    detail: `created hall task ${projectId}:${taskId}`,
+    metadata: {
+      taskCardId: taskCard.taskCardId,
+      roomId: room.roomId,
+    },
+  });
+
+  const hallRead = await readCollaborationHall(context.hall.hallId);
+  const taskDetail = await readCollaborationHallTaskDetail(taskCard.taskCardId);
+
+  if (!options.skipDiscussion) {
+    scheduleHallDiscussion(
+      taskCard.taskCardId,
+      {
+        triggerMessage: initialMessage,
+        explicitTargetParticipantIds: directedMentionParticipantIds,
+        strictMentions: directedMentionParticipantIds.length > 0,
+        toolClient: options.toolClient,
+      },
+    );
+  }
+
+  return {
+    hall: hallRead.hall,
+    hallSummary: hallRead.hallSummary,
+    taskCard: taskDetail.taskCard,
+    taskSummary: taskDetail.taskSummary,
+    task: patchedTask.task,
+    roomId: room.roomId,
+    message: initialMessage,
+    generatedMessages: [],
+  };
+}
+
+export async function postHallMessage(
+  input: HallMessageInput,
+  options: HallOrchestratorRuntimeOptions = {},
+): Promise<HallMutationResult> {
+  const context = await ensureHallContext(input.hallId);
+  const authorParticipantId = input.authorParticipantId?.trim() || "operator";
+  const authorLabel = input.authorLabel?.trim() || "Operator";
+  const normalizedContent = input.content.trim();
+  const taskCard = input.taskCardId
+    ? await requireTaskCard(input.taskCardId)
+    : input.projectId && input.taskId
+      ? await requireTaskCardByProjectTask(input.projectId, input.taskId)
+      : undefined;
+  const mentionRouting = resolveHallMentionTargets(input.content, context.hall.participants);
+  const hasDirectedMention = mentionRouting.targets.length > 0 && !mentionRouting.broadcastAll;
+  const defaultSpeaker = resolveDefaultSpeakerForStage(taskCard, context.hall.participants);
+  const targetParticipantIds = mentionRouting.broadcastAll
+    ? buildDiscussionParticipantQueue(context.hall.participants)
+    : mentionRouting.targets.length > 0
+      ? mentionRouting.targets.map((target) => target.participantId)
+      : defaultSpeaker
+        ? [defaultSpeaker]
+        : [];
+
+  if (!taskCard && authorParticipantId === "operator" && shouldPromoteHallMessageToTask(input.content, hasDirectedMention)) {
+    return createHallTaskFromOperatorRequest({
+      hallId: context.hall.hallId,
+      content: input.content,
+      authorParticipantId,
+      authorLabel,
+    }, options);
+  }
+
+  if (taskCard && authorParticipantId === "operator" && normalizedContent && mentionRouting.targets.length === 0) {
+    const recentMessages = await loadRecentHallThreadMessages(taskCard, 6);
+    const duplicateMessage = [...recentMessages]
+      .reverse()
+      .find((message) => {
+        if (message.authorParticipantId !== "operator") return false;
+        if (message.content.trim() !== normalizedContent) return false;
+        const ageMs = Date.now() - Date.parse(message.createdAt || "");
+        return Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 30_000;
+      });
+    if (duplicateMessage) {
+      const refreshed = await refreshHallAndTaskSummary(context.hall.hallId, taskCard);
+      const taskStore = await loadTaskStore();
+      const task = taskStore.tasks.find((item) => item.projectId === taskCard.projectId && item.taskId === taskCard.taskId);
+      return {
+        hall: refreshed.hall,
+        hallSummary: refreshed.hallSummary,
+        taskCard: refreshed.taskCard,
+        taskSummary: refreshed.taskSummary,
+        task,
+        roomId: taskCard.roomId,
+        message: duplicateMessage,
+        generatedMessages: [],
+      };
+    }
+  }
+
+  if (taskCard?.stage === "execution" && authorParticipantId !== "operator") {
+    assertHallExecutionAllowed(taskCard, authorParticipantId);
+  }
+
+  let nextTaskCard = taskCard;
+  let openedImplicitDiscussionCycle = false;
+  if (nextTaskCard && authorParticipantId === "operator" && shouldRouteOperatorMessageBackToDiscussion(nextTaskCard, input.content, mentionRouting.targets)) {
+    nextTaskCard = await reopenHallTaskToDiscussion(nextTaskCard, context.hall, "discussion_reopened");
+  }
+
+  if (nextTaskCard && authorParticipantId === "operator" && nextTaskCard.stage === "discussion" && mentionRouting.targets.length === 0) {
+    nextTaskCard = openDiscussionCycle(
+      nextTaskCard,
+      authorParticipantId,
+      context.hall.participants,
+      buildDynamicDiscussionParticipantQueue(context.hall, nextTaskCard, undefined, input.content),
+    );
+    nextTaskCard = (await updateHallTaskCard({
+      taskCardId: nextTaskCard.taskCardId,
+      discussionCycle: nextTaskCard.discussionCycle,
+      stage: "discussion",
+      })).taskCard;
+    openedImplicitDiscussionCycle = true;
+  }
+
+  const message = (
+    await appendHallMessage({
+      hallId: context.hall.hallId,
+      kind: "chat",
+      authorParticipantId,
+      authorLabel,
+      content: normalizedContent,
+      targetParticipantIds,
+      mentionTargets: mentionRouting.targets,
+      projectId: nextTaskCard?.projectId,
+      taskId: nextTaskCard?.taskId,
+      taskCardId: nextTaskCard?.taskCardId,
+      roomId: nextTaskCard?.roomId,
+      payload: nextTaskCard
+        ? {
+            projectId: nextTaskCard.projectId,
+            taskId: nextTaskCard.taskId,
+            taskCardId: nextTaskCard.taskCardId,
+            roomId: nextTaskCard.roomId,
+            taskStage: nextTaskCard.stage,
+            taskStatus: nextTaskCard.status,
+          }
+        : undefined,
+    })
+  ).message;
+
+  if (
+    openedImplicitDiscussionCycle
+    && nextTaskCard?.discussionCycle
+    && message.taskCardId === nextTaskCard.taskCardId
+    && Date.parse(nextTaskCard.discussionCycle.openedAt) < Date.parse(message.createdAt)
+  ) {
+    nextTaskCard = (
+      await updateHallTaskCard({
+        taskCardId: nextTaskCard.taskCardId,
+        discussionCycle: {
+          ...nextTaskCard.discussionCycle,
+          openedAt: message.createdAt,
+        },
+        stage: "discussion",
+      })
+    ).taskCard;
+  }
+
+  if (nextTaskCard && authorParticipantId === "operator" && nextTaskCard.stage === "blocked") {
+    const resumeOwnerParticipantId = nextTaskCard.currentOwnerParticipantId ?? nextTaskCard.plannedExecutionOrder[0];
+    const resumeOwnerExplicitlyMentioned = matchesExplicitHallMentionForParticipant(
+      input.content,
+      resumeOwnerParticipantId ? findParticipant(context.hall.participants, resumeOwnerParticipantId) : undefined,
+    );
+    if (resumeOwnerParticipantId && (mentionRouting.targets.length === 0 || resumeOwnerExplicitlyMentioned)) {
+      const resumed = await assignHallTaskExecution({
+        taskCardId: nextTaskCard.taskCardId,
+        ownerParticipantId: resumeOwnerParticipantId,
+        note: input.content.trim(),
+      }, options);
+      return {
+        hall: resumed.hall,
+        hallSummary: resumed.hallSummary,
+        taskCard: resumed.taskCard,
+        taskSummary: resumed.taskSummary,
+        task: resumed.task,
+        roomId: resumed.roomId,
+        message,
+        generatedMessages: resumed.generatedMessages,
+      };
+    }
+
+    if (mentionRouting.targets.length === 0) {
+      nextTaskCard = openDiscussionCycle(
+        nextTaskCard,
+        authorParticipantId,
+        context.hall.participants,
+        buildDynamicDiscussionParticipantQueue(context.hall, nextTaskCard, undefined, input.content),
+      );
+      nextTaskCard = (
+        await updateHallTaskCard({
+          taskCardId: nextTaskCard.taskCardId,
+          discussionCycle: nextTaskCard.discussionCycle,
+          stage: "discussion",
+          status: "todo",
+        })
+      ).taskCard;
+    }
+  }
+
+  if (!nextTaskCard) {
+    if (authorParticipantId === "operator") {
+      const generatedMessages: HallMessage[] = [];
+      const lobbyTargets = resolveLobbyParticipants(context.hall.participants, targetParticipantIds);
+      for (const participant of lobbyTargets) {
+        generatedMessages.push(await appendLobbyHallReply({
+          hall: context.hall,
+          participant,
+          triggerMessage: message,
+        }));
+      }
+      const hallRead = await readCollaborationHall(context.hall.hallId);
+      return {
+        hall: hallRead.hall,
+        hallSummary: hallRead.hallSummary,
+        message,
+        generatedMessages,
+      };
+    }
+    const hallRead = await readCollaborationHall(context.hall.hallId);
+    return {
+      hall: hallRead.hall,
+      hallSummary: hallRead.hallSummary,
+      message,
+      generatedMessages: [],
+    };
+  }
+
+  const taskStore = await loadTaskStore();
+  const task = taskStore.tasks.find((item) => item.projectId === nextTaskCard?.projectId && item.taskId === nextTaskCard?.taskId);
+  if (nextTaskCard.roomId) {
+    const linkedRoom = await requireLinkedRoom(nextTaskCard.roomId);
+    await publishTaskRoomBridgeEvent({
+      type: "message_posted",
+      room: linkedRoom,
+      task,
+      note: "Hall message mirrored to linked task context.",
+    });
+  }
+
+  const hallRead = await readCollaborationHall(context.hall.hallId);
+  const taskDetail = await readCollaborationHallTaskDetail(nextTaskCard.taskCardId);
+
+  scheduleHallDiscussion(
+    nextTaskCard.taskCardId,
+    {
+      triggerMessage: message,
+      explicitTargetParticipantIds: targetParticipantIds,
+      strictMentions: mentionRouting.targets.length > 0 && !mentionRouting.broadcastAll,
+      toolClient: options.toolClient,
+    },
+  );
+
+  return {
+    hall: hallRead.hall,
+    hallSummary: hallRead.hallSummary,
+    taskCard: taskDetail.taskCard,
+    taskSummary: taskDetail.taskSummary,
+    task,
+    roomId: nextTaskCard.roomId,
+    message,
+    generatedMessages: [],
+  };
+}
+
+function shouldPromoteHallMessageToTask(content: string, hasExplicitMention: boolean): boolean {
+  if (hasExplicitMention) return false;
+  const intent = classifyHallOperatorIntent(content);
+  return intent === "discussion_request" || intent === "task_request";
+}
+
+function classifyHallOperatorIntent(content: string): HallOperatorIntent {
+  const trimmed = content.trim();
+  if (!trimmed) return "light_chat";
+  if (isHallGreetingOnly(trimmed)) return "greeting";
+
+  const normalized = trimmed.toLowerCase();
+  const strongTaskSignal = [
+    /\b(build|fix|implement|create|design|plan|make|ship|debug|investigate|review|prototype|brainstorm|research|analyze|animate|visuali[sz]e)\b/i,
+    /(帮我|请帮|请你|麻烦|需要|我想|我想要|我想做|希望|制作|做一个|设计|策划|规划|分析|研究|实现|修|新增|创建|检查|排查|审核|产出|整理|写一个|准备|生成|可视化|动画|方案|创意|策略|发布|故事板|脚本)/,
+  ].some((pattern) => pattern.test(trimmed));
+  if (strongTaskSignal) return "task_request";
+
+  const discussionSignal = [
+    /[?？]/,
+    /\b(how|what|why|which|should|could|can|ideas?|advice|approach|direction|options?)\b/i,
+    /(如何|怎么|为什么|是否|要不要|应该|可以怎么|思路|建议|方向|想法|比较|评估|怎么做|做什么)/,
+  ].some((pattern) => pattern.test(trimmed));
+  if (discussionSignal) return "discussion_request";
+
+  if (normalized.length >= 18) return "discussion_request";
+  if (/[，。！？,.!?]/.test(trimmed) && trimmed.length >= 12) return "discussion_request";
+  return "light_chat";
+}
+
+function isHallGreetingOnly(content: string): boolean {
+  const normalized = content.trim().toLowerCase();
+  return [
+    "hi",
+    "hello",
+    "hey",
+    "yo",
+    "hola",
+    "你好",
+    "您好",
+    "嗨",
+    "在吗",
+    "有人吗",
+  ].includes(normalized);
+}
+
+function resolveLobbyParticipants(
+  participants: HallParticipant[],
+  targetParticipantIds: string[],
+): HallParticipant[] {
+  const uniqueTargets = [...new Set(targetParticipantIds.filter(Boolean))];
+  if (uniqueTargets.length > 0) {
+    return uniqueTargets
+      .map((participantId) => findParticipant(participants, participantId))
+      .filter((participant): participant is HallParticipant => Boolean(participant));
+  }
+  const defaultParticipant = pickPrimaryParticipantByRole(participants, "planner")
+    ?? pickPrimaryParticipantByRole(participants, "manager")
+    ?? participants[0];
+  return defaultParticipant ? [defaultParticipant] : [];
+}
+
+async function appendLobbyHallReply(input: {
+  hall: CollaborationHall;
+  participant: HallParticipant;
+  triggerMessage: HallMessage;
+}): Promise<HallMessage> {
+  const content = buildLobbyHallReply(input.participant, input.triggerMessage.content);
+  const draftId = await streamHallDraftReply({
+    hallId: input.hall.hallId,
+    authorParticipantId: input.participant.participantId,
+    authorLabel: input.participant.displayName,
+    authorSemanticRole: input.participant.semanticRole,
+    messageKind: "chat",
+    content,
+  });
+  const message = (
+    await appendHallMessage({
+      hallId: input.hall.hallId,
+      kind: "chat",
+      authorParticipantId: input.participant.participantId,
+      authorLabel: input.participant.displayName,
+      authorSemanticRole: input.participant.semanticRole,
+      content,
+      targetParticipantIds: [],
+      payload: {
+        status: "hall_lobby_reply",
+      },
+    })
+  ).message;
+  completeHallDraftReply({
+    hallId: input.hall.hallId,
+    draftId,
+    messageId: message.messageId,
+    content,
+  });
+  return message;
+}
+
+function buildLobbyHallReply(participant: HallParticipant, rawContent: string): string {
+  const language = inferHallResponseLanguage(rawContent);
+  const intent = classifyHallOperatorIntent(rawContent);
+  if (isHallGreetingOnly(rawContent)) {
+    if (participant.semanticRole === "planner") {
+      return language === "zh"
+        ? `${participant.displayName} 在。你可以直接描述想完成的任务、限制和 done_when；如果只是想点名某个人，也可以直接 @ 他。`
+        : `${participant.displayName} is here. You can describe the task, constraints, and done_when directly, or @ a specific agent if you want to address someone.`;
+    }
+    return language === "zh"
+      ? `${participant.displayName} 在。你可以先说清楚任务目标，或者直接 @ 某个 agent 开始对话。`
+      : `${participant.displayName} is here. You can clarify the goal first, or start by @mentioning a specific agent.`;
+  }
+  if (intent === "discussion_request" || intent === "task_request") {
+    if (participant.semanticRole === "planner") {
+      return language === "zh"
+        ? `${participant.displayName} 收到。我会先把这件事收敛成一条可讨论的任务线程，然后拉相关 agent 一起讨论目标、限制、风险和执行顺序。`
+        : `${participant.displayName} got it. I will first turn this into a discussable task thread, then bring the relevant agents in to discuss goals, constraints, risks, and execution order.`;
+    }
+    if (participant.semanticRole === "manager") {
+      return language === "zh"
+        ? `${participant.displayName} 收到。我们会先在大厅里展开讨论，再由你来决定谁先执行、谁后执行。`
+        : `${participant.displayName} got it. We will discuss it in the hall first, then you can decide who should execute first and who should follow.`;
+    }
+  }
+  if (participant.semanticRole === "planner") {
+    return language === "zh"
+      ? `${participant.displayName} 收到。你这条消息还没有绑定任务线程；如果这是一个新任务，我可以先帮你把目标、限制和完成标准收敛成第一张线程卡。`
+      : `${participant.displayName} got it. This message is not attached to a task thread yet; if this is a new task, I can first help turn the goal, constraints, and definition of done into the first thread card.`;
+  }
+  if (participant.semanticRole === "manager") {
+    return language === "zh"
+      ? `${participant.displayName} 收到。先在大厅里把任务目标说清楚，我们再决定由谁执行。`
+      : `${participant.displayName} got it. Let us clarify the task goal in the hall first, then decide who should execute it.`;
+  }
+  return language === "zh"
+    ? `${participant.displayName} 收到了你的大厅消息。如果这是一个新任务，请先说明目标和完成标准；如果是定向问题，也可以继续直接 @ 我。`
+    : `${participant.displayName} received your hall message. If this is a new task, please explain the goal and definition of done first; if it is a targeted question, you can keep @mentioning me directly.`;
+}
+
+function sanitizeExecutionOrder(
+  participants: HallParticipant[],
+  participantIds: string[],
+  options: { excludeParticipantId?: string } = {},
+): string[] {
+  const exclude = options.excludeParticipantId?.trim();
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const rawId of participantIds) {
+    const participantId = rawId.trim();
+    if (!participantId) continue;
+    if (exclude && participantId === exclude) continue;
+    if (seen.has(participantId)) continue;
+    if (participants.length > 0 && !findParticipant(participants, participantId)) continue;
+    seen.add(participantId);
+    ordered.push(participantId);
+  }
+  return ordered;
+}
+
+function sanitizeExecutionItems(
+  participants: HallParticipant[],
+  items: HallExecutionItem[] | undefined,
+  options: { excludeParticipantId?: string } = {},
+): HallExecutionItem[] {
+  if (!Array.isArray(items)) return [];
+  const exclude = options.excludeParticipantId?.trim();
+  const seen = new Set<string>();
+  const ordered: HallExecutionItem[] = [];
+  for (const candidate of items) {
+    const participantId = candidate?.participantId?.trim();
+    const task = candidate?.task?.trim();
+    if (!participantId || !task) continue;
+    if (exclude && participantId === exclude) continue;
+    if (seen.has(participantId)) continue;
+    if (participants.length > 0 && !findParticipant(participants, participantId)) continue;
+    seen.add(participantId);
+    ordered.push({
+      itemId: candidate.itemId?.trim() || randomUUID(),
+      participantId,
+      task,
+      handoffToParticipantId: candidate.handoffToParticipantId?.trim() || undefined,
+      handoffWhen: candidate.handoffWhen?.trim() || undefined,
+    });
+  }
+  return ordered;
+}
+
+function deriveExecutionItemsFromOrder(
+  participants: HallParticipant[],
+  participantIds: string[],
+  taskCard: HallTaskCard,
+  options: { existingItems?: HallExecutionItem[]; primaryDoneWhen?: string } = {},
+): HallExecutionItem[] {
+  const existing = new Map(
+    (options.existingItems || []).map((item) => [item.participantId, item] as const),
+  );
+  const doneWhen = options.primaryDoneWhen?.trim() || taskCard.doneWhen?.trim() || undefined;
+  return participantIds.map((participantId, index) => {
+    const participant = findParticipant(participants, participantId);
+    const cached = existing.get(participantId);
+    const nextParticipantId = cached?.handoffToParticipantId && participantIds.includes(cached.handoffToParticipantId)
+      ? cached.handoffToParticipantId
+      : participantIds[index + 1];
+    const nextParticipant = nextParticipantId ? findParticipant(participants, nextParticipantId) : undefined;
+    return {
+      itemId: cached?.itemId || randomUUID(),
+      participantId,
+      task: cached?.task || buildExecutionItemTask(taskCard, participant, index),
+      handoffToParticipantId: nextParticipant?.participantId,
+      handoffWhen: cached?.handoffWhen || buildExecutionItemHandoff(taskCard, participant, nextParticipant, index, doneWhen),
+    };
+  });
+}
+
+function buildSuggestedExecutionPlan(
+  hall: CollaborationHall,
+  taskCard: HallTaskCard,
+  recommendedOwnerParticipantId: string,
+  task?: ProjectTask,
+): { executionOrder: string[]; executionItems: HallExecutionItem[] } {
+  const domain = inferHallDiscussionDomain(taskCard, task);
+  const signals = `${taskCard.title}\n${taskCard.description}\n${taskCard.proposal ?? ""}\n${taskCard.decision ?? ""}\n${taskCard.doneWhen ?? ""}\n${taskCard.latestSummary ?? ""}`;
+  const mentioned = sanitizeExecutionOrder(hall.participants, taskCard.mentionedParticipantIds, {
+    excludeParticipantId: recommendedOwnerParticipantId,
+  });
+  const requiresInput = sanitizeExecutionOrder(hall.participants, taskCard.requiresInputFrom, {
+    excludeParticipantId: recommendedOwnerParticipantId,
+  });
+  const contributors = listRecentDiscussionParticipants(hall, taskCard, { excludeParticipantId: recommendedOwnerParticipantId });
+  const discussionPool = [...new Set([...mentioned, ...requiresInput, ...contributors])];
+  const order: string[] = [];
+  const push = (participantId: string | undefined) => {
+    if (!participantId) return;
+    if (order.includes(participantId)) return;
+    if (!findParticipant(hall.participants, participantId)) return;
+    order.push(participantId);
+  };
+
+  push(recommendedOwnerParticipantId);
+
+  const explicitMultiStep = requiresMultiStepExecution(signals);
+  const explicitReview = requiresReviewFollowup(signals);
+
+  if (explicitMultiStep || explicitReview || discussionPool.length > 0) {
+    const reviewer = pickPreferredExecutionFollowup(hall, taskCard, discussionPool, recommendedOwnerParticipantId, {
+      preferredRoles: ["reviewer"],
+    });
+    const collaborator = pickPreferredExecutionFollowup(hall, taskCard, discussionPool, recommendedOwnerParticipantId, {
+      preferredRoles: followupRoleOrderForDomain(domain, recommendedOwnerParticipantId, hall.participants),
+      excludeParticipantIds: reviewer ? [reviewer] : [],
+    });
+
+    if (domain === "creative" && explicitMultiStep) {
+      push(collaborator ?? reviewer);
+      if (explicitReview) push(reviewer ?? collaborator);
+    } else if (domain === "engineering") {
+      if (explicitMultiStep) push(collaborator);
+      if (explicitReview) push(reviewer);
+    } else if (domain === "research" || domain === "analysis" || domain === "operations" || domain === "product") {
+      if (explicitReview || discussionPool.length > 0) push(reviewer ?? collaborator);
+      if (explicitMultiStep && collaborator && !order.includes(collaborator)) push(collaborator);
+    } else {
+      if (explicitMultiStep || explicitReview) push(reviewer ?? collaborator);
+    }
+  }
+
+  const executionOrder = sanitizeExecutionOrder(hall.participants, order);
+  const existingItems = executionOrder.length > 0
+    ? taskCard.plannedExecutionItems.filter((item) => executionOrder.includes(item.participantId))
+    : taskCard.plannedExecutionItems;
+  return {
+    executionOrder,
+    executionItems: deriveExecutionItemsFromOrder(hall.participants, executionOrder, taskCard, {
+      existingItems,
+      primaryDoneWhen: task?.definitionOfDone.length ? task.definitionOfDone.join("; ") : taskCard.doneWhen,
+    }),
+  };
+}
+
+function shiftExecutionItemsForOwner(taskCard: HallTaskCard, ownerParticipantId: string | undefined): HallExecutionItem[] {
+  if (!ownerParticipantId) return taskCard.plannedExecutionItems || [];
+  const seen = new Set<string>();
+  return (taskCard.plannedExecutionItems || []).filter((item) => {
+    if (item.participantId === ownerParticipantId) return false;
+    if (seen.has(item.participantId)) return false;
+    seen.add(item.participantId);
+    return true;
+  });
+}
+
+function listRecentDiscussionParticipants(
+  hall: CollaborationHall,
+  taskCard: HallTaskCard,
+  options: { excludeParticipantId?: string } = {},
+): string[] {
+  const exclude = options.excludeParticipantId;
+  const ordered: string[] = [];
+  const push = (participantId: string | undefined) => {
+    if (!participantId || participantId === "operator" || participantId === exclude) return;
+    if (ordered.includes(participantId)) return;
+    const participant = findParticipant(hall.participants, participantId);
+    if (!participant || participant.semanticRole === "manager") return;
+    ordered.push(participantId);
+  };
+
+  for (const participantId of taskCard.discussionCycle?.completedParticipantIds || []) {
+    push(participantId);
+  }
+
+  return ordered;
+}
+
+function requiresMultiStepExecution(text: string): boolean {
+  return /(交接|handoff|接着做|然后|下一步|多阶段|多步|配合|分工|review|审核|检查|风险|验证|素材|brief|storyboard|样片|sample|first pass|feedback|handoff|next step|follow-up|multi-step|collaborat)/i.test(
+    text,
+  );
+}
+
+function requiresReviewFollowup(text: string): boolean {
+  return /(review|审核|评审|检查|风险|验证|feedback|approve|approval|sign-?off)/i.test(text);
+}
+
+function followupRoleOrderForDomain(
+  domain: HallDiscussionDomain,
+  ownerParticipantId: string,
+  participants: HallParticipant[],
+): HallSemanticRole[] {
+  const ownerRole = findParticipant(participants, ownerParticipantId)?.semanticRole;
+  if (domain === "creative") {
+    return ownerRole === "planner" ? ["coder", "reviewer", "generalist"] : ["planner", "reviewer", "generalist"];
+  }
+  if (domain === "engineering") {
+    return ownerRole === "coder" ? ["reviewer", "planner", "generalist"] : ["coder", "reviewer", "generalist"];
+  }
+  if (domain === "research" || domain === "analysis" || domain === "operations" || domain === "product") {
+    return ownerRole === "reviewer" ? ["planner", "generalist", "coder"] : ["reviewer", "planner", "generalist"];
+  }
+  return ["reviewer", "planner", "coder", "generalist"];
+}
+
+function pickPreferredExecutionFollowup(
+  hall: CollaborationHall,
+  taskCard: HallTaskCard,
+  candidateIds: string[],
+  ownerParticipantId: string,
+  options: { preferredRoles: HallSemanticRole[]; excludeParticipantIds?: string[] } ,
+): string | undefined {
+  const excluded = new Set([ownerParticipantId, ...(options.excludeParticipantIds || [])]);
+  for (const role of options.preferredRoles) {
+    const match = candidateIds
+      .map((participantId) => findParticipant(hall.participants, participantId))
+      .find((participant) => participant && !excluded.has(participant.participantId) && participant.semanticRole === role);
+    if (match) return match.participantId;
+  }
+
+  for (const participantId of candidateIds) {
+    if (excluded.has(participantId)) continue;
+    return participantId;
+  }
+
+  for (const role of options.preferredRoles) {
+    const participant = pickParticipantForRole(hall.participants, role);
+    if (participant && !excluded.has(participant.participantId)) return participant.participantId;
+  }
+
+  return undefined;
+}
+
+function buildExecutionItemTask(
+  taskCard: HallTaskCard,
+  participant: HallParticipant | undefined,
+  index: number,
+): string {
+  const title = taskCard.title.trim();
+  const lower = `${title} ${taskCard.description || ""}`.toLowerCase();
+  const language = inferHallResponseLanguage(`${taskCard.title}\n${taskCard.description}`);
+  const focus = summarizeExecutionFocus(taskCard, language);
+  if (!participant) {
+    return language === "zh"
+      ? (index === 0
+        ? `先把“${title}”的第一步做成可评审结果${focus ? `，重点是：${focus}` : "。"}`
+        : `承接“${title}”的下一步并把结果贴回大厅${focus ? `，重点延续：${focus}` : "。"}`
+      )
+      : (index === 0
+        ? `Take the first concrete pass on "${title}"${focus ? `, focusing on ${focus}` : ""}.`
+        : `Support the next step for "${title}"${focus ? `, continuing the work on ${focus}` : ""}.`
+      );
+  }
+  if (participant.semanticRole === "planner") {
+    if (language === "zh") {
+      return `先把“${title}”收成一版明确方向：目标、范围、约束和成功标准${focus ? `，重点围绕：${focus}` : "。"}`
+      ;
+    }
+    return `Turn "${title}" into a clear first-pass direction with scope, constraints, and success criteria${focus ? `, centered on ${focus}` : ""}.`;
+  }
+  if (participant.semanticRole === "coder") {
+    if (language === "zh") {
+      return `完成“${title}”的第一版执行结果，并把产物贴回群里${focus ? `，重点落实：${focus}` : "。"}`
+      ;
+    }
+    return `Deliver the first concrete pass for "${title}" and leave a reviewable artifact in the thread${focus ? `, focusing on ${focus}` : ""}.`;
+  }
+  if (participant.semanticRole === "reviewer") {
+    if (language === "zh") return `只看上一位交付的结果，指出必须改的一点；没硬 blocker 就直接交给下一位${focus ? `，重点盯：${focus}` : "。"}`
+    ;
+    return `Review the previous pass for "${title}", call out only the must-fix point, and if there is no real blocker, send it straight to the next owner${focus ? `, especially around ${focus}` : ""}.`;
+  }
+  if (participant.semanticRole === "manager") {
+    if (language === "zh") return `收住这轮结果，锁一句结论和下一步；后面还有 owner 就直接交棒${focus ? `，重点别漏：${focus}` : "。"}`
+    ;
+    return `Close the loop on "${title}", confirm the action items and next decision, and decide whether the chain should continue${focus ? `, making sure ${focus} is covered` : ""}.`;
+  }
+  if (language === "zh") {
+    return index === 0
+      ? `先把“${title}”做成第一版可评审结果${focus ? `，重点是：${focus}` : "。"}`
+      : `承接“${title}”的下一步并继续推进${focus ? `，重点延续：${focus}` : "。"}`
+      ;
+  }
+  return index === 0
+    ? `Take the first practical pass on "${title}" and share a reviewable result${focus ? `, focusing on ${focus}` : ""}.`
+    : `Pick up the next step for "${title}" and move the chain forward${focus ? `, continuing the work on ${focus}` : ""}.`;
+}
+
+function summarizeExecutionFocus(taskCard: HallTaskCard, language: HallResponseLanguage): string | undefined {
+  const raw = [taskCard.decision, taskCard.proposal, taskCard.latestSummary, taskCard.description]
+    .map((value) => value?.trim())
+    .find(Boolean);
+  if (!raw) return undefined;
+  const singleLine = raw.replace(/\s+/g, " ").trim();
+  const sentence = singleLine.split(/[。！？.!?]/)[0]?.trim();
+  if (!sentence) return undefined;
+  const stripped = sentence
+    .replace(new RegExp(`^${escapeRegExp(taskCard.title)}[:：,，\\s-]*`, "i"), "")
+    .replace(/^(关于|针对|For|About)\s*/i, "")
+    .trim();
+  if (!stripped) return undefined;
+  const max = language === "zh" ? 34 : 64;
+  return stripped.length > max ? `${stripped.slice(0, max).trim()}…` : stripped;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildExecutionItemHandoff(
+  taskCard: HallTaskCard,
+  participant: HallParticipant | undefined,
+  nextParticipant: HallParticipant | undefined,
+  index: number,
+  doneWhen: string | undefined,
+): string | undefined {
+  const language = inferHallResponseLanguage(`${taskCard.title}\n${taskCard.description}`);
+  if (index === 0 && doneWhen) {
+    return nextParticipant
+      ? (language === "zh"
+        ? `做到“${doneWhen}”就把结果贴回大厅，@${nextParticipant.displayName} 接着做。`
+        : `When this pass reaches "${doneWhen}" or is at least reviewable, post the result in the hall and @${nextParticipant.displayName} to continue.`)
+      : doneWhen;
+  }
+  if (nextParticipant) {
+    return language === "zh"
+      ? `把结果贴回大厅，@${nextParticipant.displayName} 接着做。`
+      : `Post the result in the hall and @${nextParticipant.displayName} with what changed, where the artifact lives, what remains, and what the next step should be.`;
+  }
+  if (participant?.semanticRole === "reviewer") {
+    return language === "zh"
+      ? "当审核结论和必须修改项已经在大厅里说清楚时收尾。"
+      : "Close once the review verdict and required changes are explicit in the hall.";
+  }
+  return doneWhen;
+}
+
+function findExecutionItemForParticipant(
+  taskCard: HallTaskCard,
+  participantId: string | undefined,
+): HallExecutionItem | undefined {
+  if (!participantId) return undefined;
+  const currentItem = taskCard.currentExecutionItem;
+  if (currentItem?.participantId === participantId) return currentItem;
+  return taskCard.plannedExecutionItems.find((item) => item.participantId === participantId);
+}
+
+function getCurrentExecutionItem(taskCard: HallTaskCard): HallExecutionItem | undefined {
+  return findExecutionItemForParticipant(taskCard, taskCard.currentOwnerParticipantId);
+}
+
+function getExpectedNextExecutionOwner(taskCard: HallTaskCard): string | undefined {
+  const currentExecutionItem = getCurrentExecutionItem(taskCard);
+  return currentExecutionItem?.handoffToParticipantId?.trim()
+    || taskCard.plannedExecutionOrder[0]?.trim()
+    || undefined;
+}
+
+function summarizeExecutionItemTask(
+  taskCard: HallTaskCard,
+  participantId: string | undefined,
+  language: HallResponseLanguage,
+): string | undefined {
+  const item = findExecutionItemForParticipant(taskCard, participantId);
+  const task = item?.task?.trim();
+  if (!task) return undefined;
+  const max = language === "zh" ? 72 : 120;
+  return task.length > max ? `${task.slice(0, max).trim()}…` : task;
+}
+
+function buildBlockedExecutionSummary(taskCard: HallTaskCard, participant: HallParticipant): string {
+  const language = inferHallResponseLanguage(`${taskCard.title}\n${taskCard.description}\n${taskCard.latestSummary ?? ""}`);
+  const taskSummary = summarizeExecutionItemTask(taskCard, participant.participantId, language);
+  if (language === "zh") {
+    return taskSummary
+      ? `${participant.displayName} 这一步先卡住了，缺的是“${taskSummary}”相关信息。补齐后直接继续这一棒。`
+      : `${participant.displayName} 这一步先卡住了，补齐信息后再继续。`;
+  }
+  return taskSummary
+    ? `${participant.displayName} marked the chain as blocked while working on "${taskSummary}". Once the missing input is back in the hall, continue this same step.`
+    : `${participant.displayName} marked the chain as blocked and is waiting for the missing input before continuing.`;
+}
+
+function buildReadyForReviewSummary(taskCard: HallTaskCard, participant: HallParticipant): string {
+  const language = inferHallResponseLanguage(`${taskCard.title}\n${taskCard.description}\n${taskCard.latestSummary ?? ""}`);
+  const taskSummary = summarizeExecutionItemTask(taskCard, participant.participantId, language);
+  if (language === "zh") {
+    return taskSummary
+      ? `${participant.displayName} 把“${taskSummary}”做到可评审了，现在请老板评审。`
+      : `${participant.displayName} 这一步已经可评审了，现在请老板评审。`;
+  }
+  return taskSummary
+    ? `${participant.displayName} moved "${taskSummary}" to a reviewable state and handed this step into review.`
+    : `${participant.displayName} moved the current execution step into review.`;
+}
+
+function buildReviewSummary(
+  hall: CollaborationHall,
+  taskCard: HallTaskCard,
+  reviewer: HallParticipant,
+  outcome: "approved" | "changes_requested",
+  note?: string,
+): string {
+  const language = inferHallResponseLanguage(`${taskCard.title}\n${taskCard.description}\n${note ?? ""}`);
+  const owner = findParticipant(hall.participants, taskCard.currentOwnerParticipantId);
+  const taskSummary = summarizeExecutionItemTask(taskCard, taskCard.currentOwnerParticipantId, language);
+  const trimmedNote = note?.trim();
+  if (language === "zh") {
+    if (outcome === "approved") {
+      return taskSummary
+        ? `${reviewer.displayName} 看过了，“${taskSummary}”可以过。${trimmedNote ? ` ${trimmedNote}` : ""}`.trim()
+        : `${reviewer.displayName} 看过了，这一轮可以过。${trimmedNote ? ` ${trimmedNote}` : ""}`.trim();
+    }
+    const ownerMention = owner ? `@${owner.displayName}` : "当前 owner";
+    return taskSummary
+      ? `${reviewer.displayName} 看过了，这一步还不能过。${ownerMention} 先把“${taskSummary}”改掉。${trimmedNote ? ` ${trimmedNote}` : ""}`.trim()
+      : `${reviewer.displayName} 看过了，这一轮还不能过。${ownerMention} 先按 review 改一轮。${trimmedNote ? ` ${trimmedNote}` : ""}`.trim();
+  }
+  if (outcome === "approved") {
+    return taskSummary
+      ? `${reviewer.displayName} reviewed it and this pass on "${taskSummary}" is good to ship.${trimmedNote ? ` ${trimmedNote}` : ""}`.trim()
+      : `${reviewer.displayName} reviewed it and this pass is good to ship.${trimmedNote ? ` ${trimmedNote}` : ""}`.trim();
+  }
+  const ownerMention = owner ? `@${owner.displayName}` : "the current owner";
+  return taskSummary
+    ? `${reviewer.displayName} reviewed it and this pass on "${taskSummary}" still needs work. ${ownerMention}, please revise this step and bring it back.${trimmedNote ? ` ${trimmedNote}` : ""}`.trim()
+    : `${reviewer.displayName} reviewed it and this pass still needs work. ${ownerMention}, please revise it and bring it back.${trimmedNote ? ` ${trimmedNote}` : ""}`.trim();
+}
+
+function shiftExecutionQueueForOwner(taskCard: HallTaskCard, ownerParticipantId: string | undefined): string[] {
+  if (!ownerParticipantId) return taskCard.plannedExecutionOrder;
+  const seen = new Set<string>();
+  return taskCard.plannedExecutionOrder.filter((participantId) => {
+    if (participantId === ownerParticipantId) return false;
+    if (seen.has(participantId)) return false;
+    seen.add(participantId);
+    return true;
+  });
+}
+
+export async function setHallTaskExecutionOrder(input: SetHallExecutionOrderInput): Promise<HallMutationResult> {
+  const context = await ensureHallContext();
+  let taskCard = await requireTaskCard(input.taskCardId);
+  const hasLockedActiveExecution = taskCard.stage === "execution" || taskCard.stage === "blocked";
+  const activeExecutionParticipantId = hasLockedActiveExecution
+    ? (taskCard.currentExecutionItem?.participantId?.trim() || taskCard.currentOwnerParticipantId?.trim() || undefined)
+    : undefined;
+  const executionItems = sanitizeExecutionItems(context.hall.participants, input.executionItems);
+  const executionOrder = executionItems.length > 0
+    ? executionItems.map((item) => item.participantId)
+    : sanitizeExecutionOrder(context.hall.participants, input.participantIds);
+  const explicitCurrentExecutionItem = activeExecutionParticipantId
+    ? executionItems.find((item) => item.participantId === activeExecutionParticipantId)
+    : undefined;
+  const normalizedExecutionItems = executionItems.length > 0
+    ? deriveExecutionItemsFromOrder(
+        context.hall.participants,
+        executionOrder,
+        taskCard,
+        { existingItems: executionItems, primaryDoneWhen: taskCard.doneWhen },
+      )
+    : deriveExecutionItemsFromOrder(
+        context.hall.participants,
+        executionOrder,
+        taskCard,
+        { existingItems: taskCard.plannedExecutionItems, primaryDoneWhen: taskCard.doneWhen },
+      );
+  const currentExecutionItem = activeExecutionParticipantId
+    ? explicitCurrentExecutionItem
+      ?? normalizedExecutionItems.find((item) => item.participantId === activeExecutionParticipantId)
+      ?? taskCard.currentExecutionItem
+      ?? findExecutionItemForParticipant(taskCard, activeExecutionParticipantId)
+    : null;
+  const plannedExecutionItems = activeExecutionParticipantId
+    ? normalizedExecutionItems.filter((item) => item.participantId !== activeExecutionParticipantId)
+    : normalizedExecutionItems;
+  const plannedExecutionOrder = activeExecutionParticipantId
+    ? plannedExecutionItems.map((item) => item.participantId)
+    : executionOrder;
+  const activeExecutionParticipant = activeExecutionParticipantId
+    ? findParticipant(context.hall.participants, activeExecutionParticipantId)
+    : undefined;
+  taskCard = (
+    await updateHallTaskCard({
+      taskCardId: taskCard.taskCardId,
+      plannedExecutionOrder,
+      plannedExecutionItems,
+      currentExecutionItem: hasLockedActiveExecution
+        ? currentExecutionItem
+        : null,
+      currentOwnerParticipantId: hasLockedActiveExecution
+        ? (activeExecutionParticipantId ?? taskCard.currentOwnerParticipantId)
+        : null,
+      currentOwnerLabel: hasLockedActiveExecution
+        ? (activeExecutionParticipant?.displayName ?? taskCard.currentOwnerLabel)
+        : null,
+      latestSummary: input.note?.trim() || taskCard.latestSummary,
+    })
+  ).taskCard;
+
+  const generatedMessages: HallMessage[] = [];
+
+  const refreshed = await refreshHallAndTaskSummary(context.hall.hallId, taskCard);
+  await appendOperationAudit({
+    action: "hall_task_execution_order",
+    source: "api",
+    ok: true,
+    detail: `updated execution order for hall task ${taskCard.projectId}:${taskCard.taskId}`,
+    metadata: {
+      taskCardId: taskCard.taskCardId,
+      executionOrder,
+    },
+  });
+
+  return {
+    hall: refreshed.hall,
+    hallSummary: refreshed.hallSummary,
+    taskCard: refreshed.taskCard,
+    taskSummary: refreshed.taskSummary,
+    generatedMessages,
+    task: (await loadTaskStore()).tasks.find((item) => item.projectId === taskCard.projectId && item.taskId === taskCard.taskId),
+    roomId: taskCard.roomId,
+  };
+}
+
+export async function assignHallTaskExecution(
+  input: AssignHallTaskInput,
+  options: HallOrchestratorRuntimeOptions = {},
+): Promise<HallMutationResult> {
+  const context = await ensureHallContext();
+  let taskCard = await requireTaskCard(input.taskCardId);
+  abortHallDraftRepliesForTask({
+    hallId: context.hall.hallId,
+    taskCardId: taskCard.taskCardId,
+    projectId: taskCard.projectId,
+    taskId: taskCard.taskId,
+    roomId: taskCard.roomId,
+    reason: "execution_started",
+  });
+  const ownerParticipant =
+    findParticipant(
+      context.hall.participants,
+      input.ownerParticipantId
+      ?? taskCard.plannedExecutionOrder[0]
+      ?? taskCard.currentOwnerParticipantId,
+    )
+    ?? pickPrimaryParticipantByRole(context.hall.participants, "coder")
+    ?? context.hall.participants[0];
+  if (!ownerParticipant) {
+    throw new CollaborationHallStoreValidationError("No hall participants are available for assignment.", [], 409);
+  }
+
+  const reorderedExecutionOrder = [
+    ownerParticipant.participantId,
+    ...taskCard.plannedExecutionOrder.filter((participantId) => participantId !== ownerParticipant.participantId),
+  ];
+  const reorderedExecutionItems = deriveExecutionItemsFromOrder(
+    context.hall.participants,
+    reorderedExecutionOrder,
+    taskCard,
+    {
+      existingItems: taskCard.plannedExecutionItems,
+      primaryDoneWhen: taskCard.doneWhen,
+    },
+  );
+  const fallbackNextParticipant = reorderedExecutionOrder[1]
+    ? findParticipant(context.hall.participants, reorderedExecutionOrder[1])
+    : undefined;
+  const ownerExecutionItem =
+    (taskCard.currentExecutionItem?.participantId === ownerParticipant.participantId ? taskCard.currentExecutionItem : undefined)
+    ?? reorderedExecutionItems.find((item) => item.participantId === ownerParticipant.participantId);
+  const stableOwnerExecutionItem = ownerExecutionItem
+    ?? findExecutionItemForParticipant(taskCard, ownerParticipant.participantId)
+    ?? {
+      itemId: randomUUID(),
+      participantId: ownerParticipant.participantId,
+      task: buildExecutionItemTask(taskCard, ownerParticipant, 0),
+      handoffToParticipantId: fallbackNextParticipant?.participantId,
+      handoffWhen: buildExecutionItemHandoff(taskCard, ownerParticipant, fallbackNextParticipant, 0, taskCard.doneWhen),
+    };
+
+  taskCard = acquireHallExecutionLock(taskCard, {
+    ownerParticipantId: ownerParticipant.participantId,
+    ownerLabel: ownerParticipant.displayName,
+  });
+  taskCard = (
+    await updateHallTaskCard({
+      taskCardId: taskCard.taskCardId,
+      stage: "execution",
+      status: "in_progress",
+      currentOwnerParticipantId: ownerParticipant.participantId,
+      currentOwnerLabel: ownerParticipant.displayName,
+      executionLock: taskCard.executionLock,
+      plannedExecutionOrder: reorderedExecutionOrder.slice(1),
+      plannedExecutionItems: reorderedExecutionItems.filter((item) => item.participantId !== ownerParticipant.participantId),
+      currentExecutionItem: stableOwnerExecutionItem,
+      latestSummary: input.note ?? taskCard.latestSummary,
+    })
+  ).taskCard;
+
+  let patchedTask = await patchTask({
+    taskId: taskCard.taskId,
+    projectId: taskCard.projectId,
+    status: "in_progress",
+    owner: ownerParticipant.displayName,
+    roomId: taskCard.roomId,
+  });
+
+  const language = inferHallResponseLanguage(`${taskCard.title}\n${taskCard.description}\n${taskCard.decision ?? ""}\n${taskCard.latestSummary ?? ""}`);
+  const ownerTask = stableOwnerExecutionItem?.task?.trim();
+  const ownerHandoff = stableOwnerExecutionItem?.handoffWhen?.trim();
+  const handoffContent = (() => {
+    if (language === "zh") {
+      if (input.note?.trim()) {
+        return `${ownerParticipant.displayName} 接棒。先做：${ownerTask || "推进第一步执行"}。${input.note.trim()}`;
+      }
+      return `${ownerParticipant.displayName} 接棒。先做：${ownerTask || "推进第一步执行"}。${ownerHandoff ? ownerHandoff : "做完就把结果贴回大厅。"}`
+    }
+    if (input.note?.trim()) {
+      return `${ownerParticipant.displayName} took this on. First step: ${ownerTask || "move the next execution slice forward"}. ${input.note.trim()}`;
+    }
+    return `${ownerParticipant.displayName} took this on. First step: ${ownerTask || "move the next execution slice forward"}. ${ownerHandoff ? `Then hand off like this: ${ownerHandoff}` : "Then post the result back to the hall and decide the next handoff."}`;
+  })();
+  const generatedMessages: HallMessage[] = [];
+  const usedRuntimeChain = canDispatchHallToRuntime(options.toolClient, ownerParticipant);
+  if (usedRuntimeChain) {
+    const chain = await runHallRuntimeExecutionChain({
+      hall: context.hall,
+      taskCard,
+      participant: ownerParticipant,
+      task: patchedTask.task,
+      toolClient: options.toolClient!,
+      mode: "execution",
+      note: input.note,
+      targetParticipantIds: [ownerParticipant.participantId],
+    });
+    taskCard = chain.taskCard;
+    if (chain.task) patchedTask = { ...patchedTask, task: chain.task };
+    generatedMessages.push(...chain.generatedMessages);
+  } else {
+    const ownerMessage = await appendStreamedGeneratedHallMessage({
+      hallId: context.hall.hallId,
+      kind: "status",
+      participant: ownerParticipant,
+      content: handoffContent,
+      targetParticipantIds: [ownerParticipant.participantId],
+      projectId: taskCard.projectId,
+      taskId: taskCard.taskId,
+      taskCardId: taskCard.taskCardId,
+      roomId: taskCard.roomId,
+      payload: {
+        projectId: taskCard.projectId,
+        taskId: taskCard.taskId,
+        taskCardId: taskCard.taskCardId,
+        roomId: taskCard.roomId,
+        taskStage: taskCard.stage,
+        taskStatus: patchedTask.task.status,
+        nextOwnerParticipantId: ownerParticipant.participantId,
+        status: "execution_started",
+      },
+    });
+    if (ownerMessage) generatedMessages.push(ownerMessage);
+  }
+
+  if (taskCard.roomId) {
+    if (!usedRuntimeChain) {
+      await appendChatMessage({
+        roomId: taskCard.roomId,
+        kind: "status",
+        authorRole: toRoomParticipantRole(ownerParticipant),
+        authorLabel: ownerParticipant.displayName,
+        content: handoffContent,
+        payload: {
+          executor: toRoomParticipantRole(ownerParticipant),
+          status: "execution_started",
+          taskStatus: "in_progress",
+        },
+      });
+    }
+    const linkedRoom = await requireLinkedRoom(taskCard.roomId);
+    await publishTaskRoomBridgeEvent({
+      type: "executor_assigned",
+      room: linkedRoom,
+      task: patchedTask.task,
+      note: handoffContent,
+    });
+  }
+
+  let refreshed = await refreshHallAndTaskSummary(context.hall.hallId, taskCard);
+  if (
+    refreshed.taskCard.stage === "execution"
+    && !refreshed.taskCard.currentExecutionItem
+    && stableOwnerExecutionItem
+  ) {
+    taskCard = (
+      await updateHallTaskCard({
+        taskCardId: taskCard.taskCardId,
+        currentExecutionItem: stableOwnerExecutionItem,
+      })
+    ).taskCard;
+    refreshed = await refreshHallAndTaskSummary(context.hall.hallId, taskCard);
+  }
+  await appendOperationAudit({
+    action: "hall_task_assign",
+    source: "api",
+    ok: true,
+    detail: `assigned hall task ${taskCard.projectId}:${taskCard.taskId} to ${ownerParticipant.displayName}`,
+    metadata: {
+      taskCardId: taskCard.taskCardId,
+      ownerParticipantId: ownerParticipant.participantId,
+    },
+  });
+
+  return {
+    hall: refreshed.hall,
+    hallSummary: refreshed.hallSummary,
+    taskCard: refreshed.taskCard,
+    taskSummary: refreshed.taskSummary,
+    task: patchedTask.task,
+    roomId: taskCard.roomId,
+    generatedMessages,
+  };
+}
+
+export async function submitHallTaskReview(input: ReviewHallTaskInput): Promise<HallMutationResult> {
+  const context = await ensureHallContext();
+  let taskCard = await requireTaskCard(input.taskCardId);
+  const reviewer = pickPrimaryParticipantByRole(context.hall.participants, "reviewer")
+    ?? pickPrimaryParticipantByRole(context.hall.participants, "manager")
+    ?? context.hall.participants[0];
+  if (!reviewer) {
+    throw new CollaborationHallStoreValidationError("No hall participants are available for review.", [], 409);
+  }
+
+  const nextTaskStatus: TaskState = input.outcome === "approved" ? "done" : input.blockTask ? "blocked" : "in_progress";
+  const previousOwnerLabel = taskCard.currentOwnerLabel;
+  taskCard = releaseHallExecutionLock(taskCard, input.outcome === "approved" ? "review-approved" : "review-requested-changes");
+  taskCard = (
+    await updateHallTaskCard({
+      taskCardId: taskCard.taskCardId,
+      stage: input.outcome === "approved" ? "completed" : input.blockTask ? "blocked" : "review",
+      status: nextTaskStatus,
+      currentOwnerParticipantId:
+        input.outcome === "approved" ? null : taskCard.currentOwnerParticipantId,
+      currentOwnerLabel:
+        input.outcome === "approved" ? null : taskCard.currentOwnerLabel,
+      currentExecutionItem: input.outcome === "approved" ? null : taskCard.currentExecutionItem,
+      executionLock: taskCard.executionLock,
+      latestSummary: input.note ?? taskCard.latestSummary,
+      blockers: input.outcome === "approved" ? [] : taskCard.blockers,
+    })
+  ).taskCard;
+
+  const patchedTask = await patchTask({
+    taskId: taskCard.taskId,
+    projectId: taskCard.projectId,
+    status: nextTaskStatus,
+    owner: input.outcome === "approved" ? previousOwnerLabel ?? reviewer.displayName : previousOwnerLabel ?? reviewer.displayName,
+    roomId: taskCard.roomId,
+  });
+
+  const reviewText = buildReviewSummary(
+    context.hall,
+    taskCard,
+    reviewer,
+    input.outcome === "approved" ? "approved" : "changes_requested",
+    input.note,
+  );
+  const generatedMessages: HallMessage[] = [];
+  const reviewMessage = await appendStreamedGeneratedHallMessage({
+    hallId: context.hall.hallId,
+    kind: "review",
+    participant: reviewer,
+    content: reviewText,
+    targetParticipantIds: input.outcome === "approved" ? [] : [taskCard.currentOwnerParticipantId ?? reviewer.participantId],
+    projectId: taskCard.projectId,
+    taskId: taskCard.taskId,
+    taskCardId: taskCard.taskCardId,
+    roomId: taskCard.roomId,
+    payload: {
+      projectId: taskCard.projectId,
+      taskId: taskCard.taskId,
+      taskCardId: taskCard.taskCardId,
+      roomId: taskCard.roomId,
+      artifactRefs: patchedTask.task.artifacts,
+      reviewOutcome: input.outcome,
+      taskStatus: nextTaskStatus,
+      taskStage: taskCard.stage,
+      status: input.outcome === "approved" ? "review_passed" : "review_rejected",
+    },
+  });
+  if (reviewMessage) generatedMessages.push(reviewMessage);
+
+  if (taskCard.roomId) {
+    await submitRoomReview({
+      roomId: taskCard.roomId,
+      outcome: input.outcome,
+      note: input.note,
+      blockTask: input.blockTask,
+    });
+    const linkedRoom = await requireLinkedRoom(taskCard.roomId);
+    await publishTaskRoomBridgeEvent({
+      type: "review_submitted",
+      room: linkedRoom,
+      task: patchedTask.task,
+      note: reviewText,
+    });
+  }
+
+  const refreshed = await refreshHallAndTaskSummary(context.hall.hallId, taskCard);
+  await appendOperationAudit({
+    action: "hall_task_review",
+    source: "api",
+    ok: true,
+    detail: `reviewed hall task ${taskCard.projectId}:${taskCard.taskId} with outcome ${input.outcome}`,
+    metadata: {
+      taskCardId: taskCard.taskCardId,
+      outcome: input.outcome,
+      taskStatus: nextTaskStatus,
+    },
+  });
+
+  return {
+    hall: refreshed.hall,
+    hallSummary: refreshed.hallSummary,
+    taskCard: refreshed.taskCard,
+    taskSummary: refreshed.taskSummary,
+    task: patchedTask.task,
+    roomId: taskCard.roomId,
+    generatedMessages,
+  };
+}
+
+export async function stopHallTaskExecution(input: StopHallTaskInput): Promise<HallMutationResult> {
+  const context = await ensureHallContext();
+  let taskCard = await requireTaskCard(input.taskCardId);
+  const previousOwnerLabel = taskCard.currentOwnerLabel;
+  abortHallDraftRepliesForTask({
+    hallId: context.hall.hallId,
+    taskCardId: taskCard.taskCardId,
+    projectId: taskCard.projectId,
+    taskId: taskCard.taskId,
+    roomId: taskCard.roomId,
+    reason: "stopped_by_operator",
+  });
+  taskCard = releaseHallExecutionLock(taskCard, "stopped_by_operator");
+  taskCard = (
+    await updateHallTaskCard({
+      taskCardId: taskCard.taskCardId,
+      stage: "discussion",
+      status: "todo",
+      currentOwnerParticipantId: null,
+      currentOwnerLabel: null,
+      currentExecutionItem: null,
+      executionLock: taskCard.executionLock,
+      latestSummary: input.note?.trim() || taskCard.latestSummary,
+    })
+  ).taskCard;
+
+  const patchedTask = await patchTask({
+    taskId: taskCard.taskId,
+    projectId: taskCard.projectId,
+    status: "todo",
+    owner: "Operator",
+    roomId: taskCard.roomId,
+  });
+
+  const stopText = input.note?.trim()
+    ? `Execution stopped. ${input.note.trim()}`
+    : `Execution stopped. ${previousOwnerLabel ? `${previousOwnerLabel} returned the thread to discussion.` : "The thread returned to discussion."}`;
+  const generatedMessages = [
+    await appendHallSystemMessage({
+      hallId: context.hall.hallId,
+      projectId: taskCard.projectId,
+      taskId: taskCard.taskId,
+      taskCardId: taskCard.taskCardId,
+      roomId: taskCard.roomId,
+      content: stopText,
+      payload: {
+        taskStage: "discussion",
+        taskStatus: "todo",
+        status: "execution_stopped",
+      },
+    }),
+  ];
+
+  const refreshed = await refreshHallAndTaskSummary(context.hall.hallId, taskCard);
+  await appendOperationAudit({
+    action: "hall_task_stop",
+    source: "api",
+    ok: true,
+    detail: `stopped hall task ${taskCard.projectId}:${taskCard.taskId}`,
+    metadata: {
+      taskCardId: taskCard.taskCardId,
+    },
+  });
+
+  return {
+    hall: refreshed.hall,
+    hallSummary: refreshed.hallSummary,
+    taskCard: refreshed.taskCard,
+    taskSummary: refreshed.taskSummary,
+    task: patchedTask.task,
+    roomId: taskCard.roomId,
+    generatedMessages,
+  };
+}
+
+export async function archiveHallTaskThread(input: ArchiveHallTaskInput): Promise<HallMutationResult> {
+  const context = await ensureHallContext();
+  const taskCard = await requireTaskCard(input.taskCardId);
+  await archiveHallTaskCard({
+    taskCardId: taskCard.taskCardId,
+    archivedByParticipantId: input.archivedByParticipantId ?? "operator",
+    archivedByLabel: input.archivedByLabel ?? "Operator",
+  });
+
+  const hallRead = await readCollaborationHall(context.hall.hallId);
+  await appendOperationAudit({
+    action: "hall_task_archive",
+    source: "api",
+    ok: true,
+    detail: `archived hall task ${taskCard.projectId}:${taskCard.taskId}`,
+    metadata: {
+      taskCardId: taskCard.taskCardId,
+      archivedByParticipantId: input.archivedByParticipantId ?? "operator",
+    },
+  });
+
+  return {
+    hall: hallRead.hall,
+    hallSummary: hallRead.hallSummary,
+    task: (await loadTaskStore()).tasks.find((item) => item.projectId === taskCard.projectId && item.taskId === taskCard.taskId),
+    roomId: taskCard.roomId,
+    generatedMessages: [],
+  };
+}
+
+export async function deleteHallTaskThread(input: DeleteHallTaskInput): Promise<HallMutationResult> {
+  const context = await ensureHallContext();
+  const taskCard = await requireTaskCard(input.taskCardId);
+
+  abortHallDraftRepliesForTask({
+    hallId: context.hall.hallId,
+    taskCardId: taskCard.taskCardId,
+    projectId: taskCard.projectId,
+    taskId: taskCard.taskId,
+    roomId: taskCard.roomId,
+    reason: "thread_deleted",
+  });
+
+  if (taskCard.roomId) {
+    const roomStore = await loadChatRoomStore();
+    if (getChatRoom(roomStore, taskCard.roomId)) {
+      await deleteChatRoom({
+        roomId: taskCard.roomId,
+        deleteMessages: true,
+      });
+    }
+  }
+
+  const taskStore = await loadTaskStore();
+  if (taskStore.tasks.some((item) => item.projectId === taskCard.projectId && item.taskId === taskCard.taskId)) {
+    await deleteTask({
+      taskId: taskCard.taskId,
+      projectId: taskCard.projectId,
+    });
+  }
+
+  await deleteHallMessagesForTaskCard({
+    hallId: taskCard.hallId,
+    taskCardId: taskCard.taskCardId,
+    taskId: taskCard.taskId,
+    roomId: taskCard.roomId,
+  });
+  await deleteHallTaskCard({
+    taskCardId: taskCard.taskCardId,
+  });
+
+  const hallRead = await readCollaborationHall(context.hall.hallId);
+  await appendOperationAudit({
+    action: "hall_task_delete",
+    source: "api",
+    ok: true,
+    detail: `deleted hall task ${taskCard.projectId}:${taskCard.taskId}`,
+    metadata: {
+      taskCardId: taskCard.taskCardId,
+      roomId: taskCard.roomId,
+    },
+  });
+
+  return {
+    hall: hallRead.hall,
+    hallSummary: hallRead.hallSummary,
+    roomId: taskCard.roomId,
+    generatedMessages: [],
+  };
+}
+
+export async function recordHallTaskHandoff(
+  input: HallHandoffInput,
+  options: HallOrchestratorRuntimeOptions = {},
+): Promise<HallMutationResult> {
+  const context = await ensureHallContext();
+  let taskCard = await requireTaskCard(input.taskCardId);
+  const fromParticipant = requireHallParticipant(context.hall.participants, input.fromParticipantId, "fromParticipantId");
+  const toParticipant = requireHallParticipant(context.hall.participants, input.toParticipantId, "toParticipantId");
+  const handoff = buildStructuredHandoffPacket(input.handoff);
+  const handoffSummary = summarizeStructuredHandoff(handoff, {
+    language: inferHallResponseLanguage(`${taskCard.title}\n${taskCard.description}\n${taskCard.latestSummary ?? ""}`),
+  });
+  const expectedNextOwnerParticipantId = getExpectedNextExecutionOwner(taskCard);
+  const handoffMatchesQueue = !expectedNextOwnerParticipantId || expectedNextOwnerParticipantId === toParticipant.participantId;
+
+  taskCard = releaseHallExecutionLock(taskCard, `handoff:${toParticipant.participantId}`);
+  taskCard = (
+    await updateHallTaskCard({
+      taskCardId: taskCard.taskCardId,
+      stage: "execution",
+      status: "in_progress",
+      currentOwnerParticipantId: toParticipant.participantId,
+      currentOwnerLabel: toParticipant.displayName,
+      executionLock: taskCard.executionLock,
+      blockers: handoff.blockers,
+      requiresInputFrom: handoff.requiresInputFrom,
+      doneWhen: handoff.doneWhen,
+      plannedExecutionOrder: handoffMatchesQueue
+        ? shiftExecutionQueueForOwner(taskCard, toParticipant.participantId)
+        : taskCard.plannedExecutionOrder,
+      plannedExecutionItems: handoffMatchesQueue
+        ? shiftExecutionItemsForOwner(taskCard, toParticipant.participantId)
+        : taskCard.plannedExecutionItems,
+      currentExecutionItem: findExecutionItemForParticipant(taskCard, toParticipant.participantId),
+      latestSummary: handoff.currentResult,
+    })
+  ).taskCard;
+  taskCard = acquireHallExecutionLock(taskCard, {
+    ownerParticipantId: toParticipant.participantId,
+    ownerLabel: toParticipant.displayName,
+  });
+  taskCard = (await updateHallTaskCard({
+    taskCardId: taskCard.taskCardId,
+    executionLock: taskCard.executionLock,
+    stage: "execution",
+  })).taskCard;
+
+  let patchedTask = await patchTask({
+    taskId: taskCard.taskId,
+    projectId: taskCard.projectId,
+    status: "in_progress",
+    owner: toParticipant.displayName,
+    roomId: taskCard.roomId,
+  });
+
+  const generatedMessages: HallMessage[] = [];
+  if (!handoffMatchesQueue && expectedNextOwnerParticipantId) {
+    const expected = findParticipant(context.hall.participants, expectedNextOwnerParticipantId)?.displayName ?? expectedNextOwnerParticipantId;
+    generatedMessages.push(await appendHallSystemMessage({
+      hallId: context.hall.hallId,
+      projectId: taskCard.projectId,
+      taskId: taskCard.taskId,
+      taskCardId: taskCard.taskCardId,
+      roomId: taskCard.roomId,
+      content: `Handoff moved to ${toParticipant.displayName}, but the planned next owner was ${expected}. Review or update the execution order if needed.`,
+      payload: {
+        taskStage: taskCard.stage,
+        taskStatus: taskCard.status,
+        status: "handoff_order_mismatch",
+        nextOwnerParticipantId: toParticipant.participantId,
+        executionOrder: taskCard.plannedExecutionOrder,
+      },
+    }));
+  }
+  const shouldAutoDispatchToNextOwner = handoffMatchesQueue || !expectedNextOwnerParticipantId;
+  if (shouldAutoDispatchToNextOwner && canDispatchHallToRuntime(options.toolClient, toParticipant)) {
+    const placeholderDraftId = beginHallDraftReply({
+      hallId: context.hall.hallId,
+      taskCardId: taskCard.taskCardId,
+      projectId: taskCard.projectId,
+      taskId: taskCard.taskId,
+      roomId: taskCard.roomId,
+      authorParticipantId: toParticipant.participantId,
+      authorLabel: toParticipant.displayName,
+      authorSemanticRole: toParticipant.semanticRole,
+      messageKind: "handoff",
+      content: "",
+    });
+    try {
+      const chain = await runHallRuntimeExecutionChain({
+        hall: context.hall,
+        taskCard,
+        participant: toParticipant,
+        task: patchedTask.task,
+        toolClient: options.toolClient!,
+        mode: "handoff",
+        handoff,
+        targetParticipantIds: [toParticipant.participantId],
+      });
+      taskCard = chain.taskCard;
+      if (chain.task) patchedTask = { ...patchedTask, task: chain.task };
+      generatedMessages.push(...chain.generatedMessages);
+    } finally {
+      abortHallDraftReply({
+        hallId: context.hall.hallId,
+        taskCardId: taskCard.taskCardId,
+        projectId: taskCard.projectId,
+        taskId: taskCard.taskId,
+        roomId: taskCard.roomId,
+        draftId: placeholderDraftId,
+        reason: "handoff_runtime_started",
+      });
+    }
+  } else {
+    const handoffMessage = await appendStreamedGeneratedHallMessage({
+      hallId: context.hall.hallId,
+      kind: "handoff",
+      participant: fromParticipant,
+      content: handoffSummary,
+      targetParticipantIds: [toParticipant.participantId],
+      projectId: taskCard.projectId,
+      taskId: taskCard.taskId,
+      taskCardId: taskCard.taskCardId,
+      roomId: taskCard.roomId,
+      payload: {
+        projectId: taskCard.projectId,
+        taskId: taskCard.taskId,
+        taskCardId: taskCard.taskCardId,
+        roomId: taskCard.roomId,
+        handoff,
+        nextOwnerParticipantId: toParticipant.participantId,
+        doneWhen: handoff.doneWhen,
+        taskStatus: patchedTask.task.status,
+        taskStage: taskCard.stage,
+        status: "handoff_recorded",
+      },
+    });
+    if (handoffMessage) generatedMessages.push(handoffMessage);
+  }
+
+  if ((handoff.artifactRefs ?? []).length > 0) {
+    const mergedArtifacts = mergeTaskArtifacts(patchedTask.task.artifacts, handoff.artifactRefs);
+    if (!sameTaskArtifacts(patchedTask.task.artifacts, mergedArtifacts)) {
+      patchedTask = await patchTask({
+        taskId: taskCard.taskId,
+        projectId: taskCard.projectId,
+        artifacts: mergedArtifacts,
+      });
+    }
+  }
+
+  if (taskCard.roomId) {
+    await recordRoomHandoff({
+      roomId: taskCard.roomId,
+      fromRole: toRoomParticipantRole(fromParticipant),
+      toRole: toRoomParticipantRole(toParticipant),
+      note: truncateLinkedRoomHandoffNote(handoffSummary),
+    });
+    const linkedRoom = await requireLinkedRoom(taskCard.roomId);
+    await publishTaskRoomBridgeEvent({
+      type: "handoff_recorded",
+      room: linkedRoom,
+      task: patchedTask.task,
+      note: handoffSummary,
+    });
+  }
+
+  const refreshed = await refreshHallAndTaskSummary(context.hall.hallId, taskCard);
+  await appendOperationAudit({
+    action: "hall_task_handoff",
+    source: "api",
+    ok: true,
+    detail: `handed off hall task ${taskCard.projectId}:${taskCard.taskId} from ${fromParticipant.displayName} to ${toParticipant.displayName}`,
+    metadata: {
+      taskCardId: taskCard.taskCardId,
+      fromParticipantId: fromParticipant.participantId,
+      toParticipantId: toParticipant.participantId,
+    },
+  });
+
+  return {
+    hall: refreshed.hall,
+    hallSummary: refreshed.hallSummary,
+    taskCard: refreshed.taskCard,
+    taskSummary: refreshed.taskSummary,
+    task: patchedTask.task,
+    roomId: taskCard.roomId,
+    generatedMessages,
+  };
+}
+
+async function runHallDiscussion(
+  taskCardId: string,
+  options: {
+    triggerMessage?: HallMessage;
+    explicitTargetParticipantIds?: string[];
+    strictMentions?: boolean;
+    toolClient?: ToolClient;
+  } = {},
+): Promise<{
+  hall: CollaborationHall;
+  hallSummary: CollaborationHallSummary;
+  taskCard: HallTaskCard;
+  taskSummary: HallTaskSummary;
+  generatedMessages: HallMessage[];
+}> {
+  const context = await ensureHallContext();
+  let taskCard = await requireTaskCard(taskCardId);
+  const generatedMessages: HallMessage[] = [];
+  const explicitTargets = [...new Set((options.explicitTargetParticipantIds ?? []).filter(Boolean))];
+  const taskStore = await loadTaskStore();
+  const task = taskStore.tasks.find((item) => item.projectId === taskCard.projectId && item.taskId === taskCard.taskId);
+  let currentTriggerMessage = options.triggerMessage;
+  let cycleTriggerMessage = options.triggerMessage;
+
+  try {
+    if (taskCard.stage !== "discussion") {
+      const defaultSpeaker = resolveDefaultSpeakerForStage(taskCard, context.hall.participants);
+      const targetIds = options.strictMentions
+        ? explicitTargets
+        : explicitTargets.length > 0
+          ? explicitTargets.slice(0, 1)
+          : defaultSpeaker
+            ? [defaultSpeaker]
+            : [];
+      for (const participantId of targetIds) {
+        const participant = findParticipant(context.hall.participants, participantId);
+        if (!participant) continue;
+        const created = await appendGeneratedHallReply(
+          context.hall,
+          taskCard,
+          participant,
+          task,
+          currentTriggerMessage,
+          options.toolClient,
+        );
+        taskCard = created.taskCard;
+        if (created.message) {
+          generatedMessages.push(created.message);
+          currentTriggerMessage = created.message;
+        } else {
+          break;
+        }
+        if (!options.strictMentions) break;
+      }
+
+      const refreshed = await refreshHallAndTaskSummary(context.hall.hallId, taskCard);
+      return {
+        hall: refreshed.hall,
+        hallSummary: refreshed.hallSummary,
+        taskCard: refreshed.taskCard,
+        taskSummary: refreshed.taskSummary,
+        generatedMessages,
+      };
+    }
+
+    let recentThreadMessages = await loadRecentHallThreadMessages(taskCard);
+    if (!cycleTriggerMessage || cycleTriggerMessage.authorParticipantId !== "operator") {
+      cycleTriggerMessage = [...recentThreadMessages]
+        .reverse()
+        .find((message) => message.authorParticipantId === "operator")
+        ?? currentTriggerMessage;
+    }
+    const discussionTriggerMessage = cycleTriggerMessage ?? currentTriggerMessage;
+    const spokenParticipantIds = new Set<string>();
+    const explicitQueue = options.strictMentions && explicitTargets.length > 0 ? explicitTargets.slice() : [];
+    const maxDiscussionTurns = explicitQueue.length > 0 ? explicitQueue.length : 3;
+
+    for (let turn = 0; turn < maxDiscussionTurns; turn += 1) {
+      const plannedParticipantIds = explicitQueue.length > 0
+        ? explicitQueue.filter((participantId) => !spokenParticipantIds.has(participantId))
+        : determineDiscussionTurnParticipants({
+            hall: context.hall,
+            taskCard,
+            task,
+            triggerMessage: discussionTriggerMessage,
+            recentThreadMessages: [...recentThreadMessages, ...generatedMessages],
+          }).filter((participantId) => !spokenParticipantIds.has(participantId));
+      const participantId = plannedParticipantIds[0];
+      if (!participantId) break;
+      const participant = findParticipant(context.hall.participants, participantId);
+      if (!participant) continue;
+      const created = await appendGeneratedHallReply(
+        context.hall,
+        taskCard,
+        participant,
+        task,
+        discussionTriggerMessage,
+        options.toolClient,
+      );
+      taskCard = created.taskCard;
+      if (created.message) {
+        generatedMessages.push(created.message);
+        recentThreadMessages = [...recentThreadMessages, created.message].slice(-12);
+        currentTriggerMessage = created.message;
+      } else {
+        break;
+      }
+      spokenParticipantIds.add(participant.participantId);
+      if (participant.semanticRole === "manager" && explicitQueue.length === 0) {
+        break;
+      }
+    }
+
+    const refreshed = await refreshHallAndTaskSummary(context.hall.hallId, taskCard);
+    return {
+      hall: refreshed.hall,
+      hallSummary: refreshed.hallSummary,
+      taskCard: refreshed.taskCard,
+      taskSummary: refreshed.taskSummary,
+      generatedMessages,
+    };
+  } finally {
+    // Discussion typing now reflects only real in-flight runtime drafts.
+  }
+}
+
+async function loadRecentHallThreadMessages(taskCard: HallTaskCard, limit = 12): Promise<HallMessage[]> {
+  const messageStore = await loadCollaborationHallMessageStore();
+  return listHallMessages(messageStore, { hallId: taskCard.hallId })
+    .filter((message) => message.taskCardId === taskCard.taskCardId || message.taskId === taskCard.taskId)
+    .slice(-limit);
+}
+
+function determineDiscussionTurnParticipants(input: {
+  hall: CollaborationHall;
+  taskCard: HallTaskCard;
+  task?: ProjectTask;
+  triggerMessage?: HallMessage;
+  recentThreadMessages: HallMessage[];
+}): string[] {
+  const cycleOpenedAt = input.taskCard.discussionCycle?.openedAt;
+  const cycleTriggerMessage = [...input.recentThreadMessages]
+    .reverse()
+    .find((message) => {
+      if (message.authorParticipantId !== "operator") return false;
+      if (message.taskCardId !== input.taskCard.taskCardId && message.taskId !== input.taskCard.taskId) return false;
+      return !cycleOpenedAt || message.createdAt >= cycleOpenedAt;
+    });
+  const triggerText = cycleTriggerMessage?.content?.trim()
+    || input.triggerMessage?.content?.trim()
+    || `${input.taskCard.title}\n${input.taskCard.description}\n${input.task?.title ?? ""}`;
+  const explicitTargets = [
+    ...new Set(
+      (
+        cycleTriggerMessage?.mentionTargets?.map((target) => target.participantId)
+        ?? input.triggerMessage?.mentionTargets?.map((target) => target.participantId)
+        ?? []
+      ).filter(Boolean),
+    ),
+  ];
+  const candidateIds = [
+    ...new Set(
+      (input.taskCard.discussionCycle?.expectedParticipantIds?.length
+        ? input.taskCard.discussionCycle.expectedParticipantIds
+        : buildDynamicDiscussionParticipantQueue(input.hall, input.taskCard, input.task, triggerText)),
+    ),
+  ];
+  const candidates = candidateIds
+    .map((participantId) => findParticipant(input.hall.participants, participantId))
+    .filter((participant): participant is HallParticipant => Boolean(participant));
+  const manager = candidates.find((participant) => participant.semanticRole === "manager");
+  const nonManagers = candidates.filter((participant) => participant.semanticRole !== "manager");
+  const currentCycleContributorCount = input.taskCard.discussionCycle?.completedParticipantIds.length ?? 0;
+  const historicalAgentContributors = countDistinctAgentContributors(input.recentThreadMessages);
+  const priorAgentContributors = Math.max(
+    currentCycleContributorCount,
+    countDistinctAgentContributors(
+      input.recentThreadMessages,
+      input.taskCard.discussionCycle?.openedAt,
+    ),
+  );
+  const followupIntent = classifyHallDiscussionFollowupIntent(triggerText);
+  const wantsContinuation = requestsDiscussionContinuation(triggerText);
+  const wantsConcreteDeliverable = followupIntent === "direct_deliverable_request"
+    || followupIntent === "repo_scan_request"
+    || followupIntent === "review_request";
+  const wantsDecision = !wantsContinuation && followupIntent === "decision_request";
+  const wantsManyVoices = requestsMultiPerspectiveDiscussion(triggerText);
+  const kickoffDiscussion = priorAgentContributors === 0 && historicalAgentContributors === 0;
+  const needsTwoImplicitVoices = explicitTargets.length === 0;
+  const planned: string[] = [];
+
+  const push = (participantId: string | undefined) => {
+    if (!participantId || planned.includes(participantId)) return;
+    planned.push(participantId);
+  };
+
+  const lead = nonManagers[0] ?? manager;
+  const complement = pickComplementaryDiscussionParticipant(nonManagers, lead)
+    ?? nonManagers[1];
+
+  if (explicitTargets.length > 0 && wantsConcreteDeliverable) {
+    push(explicitTargets[0]);
+    return planned.slice(0, 1);
+  }
+
+  if (needsTwoImplicitVoices) {
+    if (priorAgentContributors < 1) {
+      push(lead?.participantId ?? complement?.participantId ?? manager?.participantId);
+      return planned.slice(0, 1);
+    }
+    if (priorAgentContributors < 2) {
+      push(complement?.participantId ?? manager?.participantId ?? lead?.participantId);
+      return planned.slice(0, 1);
+    }
+  }
+
+  if (kickoffDiscussion) {
+    push(lead?.participantId);
+    if (!explicitTargets.length) {
+      push(complement?.participantId ?? manager?.participantId);
+    }
+    return planned.slice(0, 2);
+  }
+
+  if (wantsDecision) {
+    if (wantsConcreteDeliverable) {
+      push(manager?.participantId ?? lead?.participantId);
+      return planned.slice(0, 1);
+    }
+    if (needsTwoImplicitVoices && priorAgentContributors < 1) {
+      push(lead?.participantId);
+      return planned.slice(0, 1);
+    }
+    if (needsTwoImplicitVoices && priorAgentContributors < 2) {
+      push(complement?.participantId ?? lead?.participantId);
+      return planned.slice(0, 1);
+    }
+    if (currentCycleContributorCount === 0 && historicalAgentContributors >= 1) {
+      push(manager?.participantId ?? lead?.participantId);
+      return planned.slice(0, 1);
+    }
+    if (!wantsManyVoices && priorAgentContributors >= 1) {
+      push(manager?.participantId ?? lead?.participantId);
+      return planned.slice(0, 1);
+    }
+    if (priorAgentContributors >= 2) {
+      push(manager?.participantId ?? lead?.participantId);
+      return planned.slice(0, 1);
+    }
+    push(complement?.participantId ?? lead?.participantId);
+    return planned.slice(0, 1);
+  }
+
+  if (wantsContinuation) {
+    if (needsTwoImplicitVoices && priorAgentContributors < 1) {
+      push(lead?.participantId ?? complement?.participantId);
+      return planned.slice(0, 1);
+    }
+    if (needsTwoImplicitVoices && priorAgentContributors < 2) {
+      push(complement?.participantId ?? lead?.participantId);
+      return planned.slice(0, 1);
+    }
+    if (explicitTargets.length > 0) {
+      push(lead?.participantId ?? complement?.participantId);
+      return planned.slice(0, 1);
+    }
+    return [];
+  }
+
+  if (wantsManyVoices) {
+    if (priorAgentContributors < 1) {
+      push(lead?.participantId);
+      return planned.slice(0, 1);
+    }
+    if (priorAgentContributors < 2) {
+      push(complement?.participantId ?? lead?.participantId);
+      return planned.slice(0, 1);
+    }
+    return [];
+  }
+
+  if (!explicitTargets.length && priorAgentContributors < 1) {
+    push(lead?.participantId ?? complement?.participantId);
+    return planned.slice(0, 1);
+  }
+
+  if (!explicitTargets.length && priorAgentContributors < 2) {
+    push(complement?.participantId ?? lead?.participantId);
+    return planned.slice(0, 1);
+  }
+
+  return [];
+}
+
+function requestsMultiPerspectiveDiscussion(text: string): boolean {
+  return /(大家|你们|各自|分别|一起讨论|多角度|不同角度|给点意见|怎么看|有什么意见|brainstorm|different perspectives|everyone|each of you|discuss together)/i.test(text);
+}
+
+function requestsDiscussionDecision(text: string): boolean {
+  return /(收口|总结|拍板|定一下|决策|给个结论|下结论|谁先做|谁来做|谁负责|执行顺序|下一步|owner|executor|decision|summari[sz]e|wrap up|who should|next step)/i.test(text);
+}
+
+function requestsDiscussionContinuation(text: string): boolean {
+  return /(继续讨论|继续聊|先讨论|先聊|先只讨论|只讨论|不急着收口|先别收口|先不要收口|不急着总结|先别总结|先不要总结|不要总结|先不拍板|先别拍板|先不要拍板|不要拍板|先别给结论|先不要给结论|别急着定|先不要定|先别定)/i.test(text);
+}
+
+function requestsExecutionContinuation(text: string): boolean {
+  return /(继续执行|继续这一步|继续当前步骤|继续当前执行|按原计划继续|接着做这一步|接着做当前步骤|接着往下做|就继续做|继续推进|resume execution|continue execution|continue this step|keep going|keep working on|finish this step)/i.test(text);
+}
+
+function classifyHallDiscussionFollowupIntent(
+  text: string,
+): "discussion_request" | "direct_deliverable_request" | "repo_scan_request" | "review_request" | "decision_request" {
+  const normalized = text.trim();
+  const normalizedIntentSource = normalizeHallIntentSourceText(normalized);
+  if (!normalized) return "discussion_request";
+  if (requestsDiscussionContinuation(normalized)) return "discussion_request";
+  if (/(收一下|收个口|给个结论|拍板|定一下|做决定|作决定|第一执行者|建议第一位执行者|先给.*第一步|给.*第一步|谁先做|谁来做第一步|谁来先做|执行顺序|下一步由谁|谁负责|owner|executor|decision|wrap up|summari[sz]e)/i.test(normalized)) {
+    return "decision_request";
+  }
+  if (looksLikeRepoInspectionRequest(normalizedIntentSource)) {
+    return "repo_scan_request";
+  }
+  if (/(must-fix|review|审核|评审|检查|挑一下|挑出|只挑|硬问题|硬缺口)/i.test(normalized)) {
+    return "review_request";
+  }
+  if (/(给我|给一下|直接给|你给|你来|你去|请你|帮我|直接出|出一下|写一下|写一版|给一版|直接贴|贴一下|去扫|扫一下|看一下|查一下|产出|生成|整理|总结|扫描|优化|改一下|改一版|改版|再优化|减字|加图|加一些图|润色|收紧|scan|inspect|check|review|write|draft|produce|generate|optimize|revise|polish|tighten|show me|give me|please give|please write|please scan|can you|could you|完整的?.*(开头|口播|脚本|文案|版本)|三个?.*(开头|视频开头|口播开头)|3 个.*(开头|视频开头|口播开头|hook|thumbnail))/i.test(normalized)) {
+    return "direct_deliverable_request";
+  }
+  return "discussion_request";
+}
+
+function normalizeHallIntentSourceText(text: string): string {
+  return String(text || "")
+    .replace(/file:\/\/\/\S+/gi, " ")
+    .replace(/\bhttps?:\/\/\S+\.(?:html?|png|jpe?g|gif|webp|svg)(?:[?#]\S*)?/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function looksLikeRepoInspectionRequest(text: string): boolean {
+  const normalized = normalizeHallIntentSourceText(text);
+  if (!normalized) return false;
+  return /(repo|repository|codebase|source code|scan code|scan the repo|implementation|file path|source file|entry file|看代码|看仓库|查仓库|扫描代码|扫代码|源码|仓库|实现|入口文件|文件路径|哪个文件|哪些文件)/i.test(normalized);
+}
+
+function requestsConcreteDeliverable(text: string): boolean {
+  return /(先出|先给|直接出|先写|写一个|给我一版|来一版|草稿|初稿|脚本|beat sheet|storyboard|分镜|outline|大纲|第一版|draft|first draft|first pass|deliverable|产出一版|出个方案|出一个方案)/i.test(text);
+}
+
+function countDistinctAgentContributors(messages: HallMessage[], openedAt?: string): number {
+  const contributors = new Set<string>();
+  const openedAtTs = openedAt ? Date.parse(openedAt) : Number.NaN;
+  for (const message of messages) {
+    if (!Number.isNaN(openedAtTs)) {
+      const createdAtTs = Date.parse(message.createdAt);
+      if (!Number.isNaN(createdAtTs) && createdAtTs < openedAtTs) continue;
+    }
+    if (message.authorParticipantId === "operator") continue;
+    if (!message.authorSemanticRole) continue;
+    contributors.add(message.authorParticipantId);
+  }
+  return contributors.size;
+}
+
+function pickComplementaryDiscussionParticipant(
+  candidates: HallParticipant[],
+  lead: HallParticipant | undefined,
+): HallParticipant | undefined {
+  if (!lead) return candidates[1];
+  const preferredRoles = complementaryDiscussionRoles(lead.semanticRole);
+  for (const role of preferredRoles) {
+    const match = candidates.find((participant) => participant.participantId !== lead.participantId && participant.semanticRole === role);
+    if (match) return match;
+  }
+  return candidates.find((participant) => participant.participantId !== lead.participantId);
+}
+
+function complementaryDiscussionRoles(
+  leadRole: HallSemanticRole,
+): HallSemanticRole[] {
+  if (leadRole === "planner") {
+    return ["coder", "reviewer", "generalist"];
+  }
+  if (leadRole === "coder") return ["reviewer", "planner", "generalist"];
+  if (leadRole === "reviewer") return ["planner", "coder", "generalist"];
+  return ["planner", "coder", "reviewer", "generalist"];
+}
+
+function scheduleHallDiscussion(
+  taskCardId: string,
+  options: Parameters<typeof runHallDiscussion>[1],
+  afterDiscussion?: (result: Awaited<ReturnType<typeof runHallDiscussion>>) => Promise<void> | void,
+): void {
+  let pending: Promise<void> | undefined;
+  pending = (async () => {
+    try {
+      const result = await runHallDiscussion(taskCardId, options);
+      if (afterDiscussion) {
+        await afterDiscussion(result);
+      }
+    } catch (error) {
+      await appendOperationAudit({
+        action: "hall_task_message",
+        source: "api",
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error),
+        metadata: { taskCardId },
+      });
+    } finally {
+      if (pending) pendingHallBackgroundWork.delete(pending);
+    }
+  })();
+  pendingHallBackgroundWork.add(pending);
+}
+
+async function runHallRuntimeExecutionChain(input: {
+  hall: CollaborationHall;
+  taskCard: HallTaskCard;
+  participant: HallParticipant;
+  task?: ProjectTask;
+  toolClient: ToolClient;
+  mode: "execution" | "handoff";
+  note?: string;
+  handoff?: StructuredHandoffPacket;
+  triggerMessage?: HallMessage;
+  targetParticipantIds: string[];
+}): Promise<{ taskCard: HallTaskCard; task?: ProjectTask; generatedMessages: HallMessage[] }> {
+  let taskCard = input.taskCard;
+  let task = input.task;
+  let mode = input.mode;
+  let note = input.note;
+  let handoff = input.handoff;
+  let triggerMessage = input.triggerMessage;
+  const generatedMessages: HallMessage[] = [];
+  const visibleTurnBudget = HALL_RUNTIME_EXECUTION_CHAIN_ENABLED
+    ? Math.max(1, HALL_RUNTIME_EXECUTION_MAX_TURNS)
+    : 1;
+  const hiddenRetryBudget = Math.max(2, visibleTurnBudget * 2);
+  let visibleTurns = 0;
+  let hiddenRetries = 0;
+
+  for (;;) {
+    let runtimeResult: HallRuntimeDispatchResult;
+    try {
+      runtimeResult = await dispatchHallRuntimeTurn({
+        client: input.toolClient,
+        hall: input.hall,
+        taskCard,
+        participant: input.participant,
+        task,
+        triggerMessage,
+        mode,
+        handoff,
+        note,
+      });
+    } catch (error) {
+      generatedMessages.push(await appendRuntimeFailureHallMessage(input.hall, taskCard, input.participant, error));
+      return { taskCard, task, generatedMessages };
+    }
+
+    if (runtimeResult.canceled) {
+      return { taskCard, task, generatedMessages };
+    }
+
+    let persistedRuntimeMessage: HallMessage | undefined;
+    if (!runtimeResult.suppressVisibleMessage) {
+      persistedRuntimeMessage = await appendPersistedHallMessage({
+        hallId: input.hall.hallId,
+        kind: runtimeResult.kind,
+        participant: input.participant,
+        content: runtimeResult.content,
+        targetParticipantIds: input.targetParticipantIds,
+        projectId: taskCard.projectId,
+        taskId: taskCard.taskId,
+        taskCardId: taskCard.taskCardId,
+        roomId: taskCard.roomId,
+        payload: runtimeResult.payload,
+      });
+      generatedMessages.push(persistedRuntimeMessage);
+      visibleTurns += 1;
+
+      taskCard = await linkHallRuntimeArtifacts({
+        taskCard,
+        task,
+        participant: input.participant,
+        message: persistedRuntimeMessage,
+        runtimeResult,
+      });
+      if (task) {
+        const refreshedTaskStore = await loadTaskStore();
+        task = refreshedTaskStore.tasks.find((item) => item.projectId === taskCard.projectId && item.taskId === taskCard.taskId) ?? task;
+      }
+    }
+
+    const directive = runtimeResult.chainDirective;
+    if (runtimeResult.suppressVisibleMessage && directive?.nextAction === "continue") {
+      hiddenRetries += 1;
+      if (hiddenRetries < hiddenRetryBudget) {
+        note = buildHallExecutionContinuationNote(taskCard, directive, visibleTurns, visibleTurnBudget);
+        mode = "execution";
+        handoff = undefined;
+        triggerMessage = undefined;
+        continue;
+      }
+      generatedMessages.push(await appendHallSystemMessage({
+        hallId: input.hall.hallId,
+        projectId: taskCard.projectId,
+        taskId: taskCard.taskId,
+        taskCardId: taskCard.taskCardId,
+        roomId: taskCard.roomId,
+        content: buildMissingConcreteDeliverableSummary(taskCard, input.participant),
+        payload: {
+          taskStage: taskCard.stage,
+          taskStatus: taskCard.status,
+          status: "execution_missing_deliverable",
+        },
+      }));
+      return { taskCard, task, generatedMessages };
+    }
+
+    if (!shouldContinueHallExecutionChain(directive, visibleTurns, visibleTurnBudget)) {
+      const transition = await applyHallExecutionDirective({
+        hall: input.hall,
+        taskCard,
+        task,
+        participant: input.participant,
+        directive,
+        toolClient: input.toolClient,
+      });
+      taskCard = transition.taskCard;
+      task = transition.task;
+      generatedMessages.push(...transition.generatedMessages);
+      return { taskCard, task, generatedMessages };
+    }
+
+    note = buildHallExecutionContinuationNote(taskCard, directive, visibleTurns, visibleTurnBudget);
+    mode = "execution";
+    handoff = undefined;
+    triggerMessage = undefined;
+  }
+}
+
+function shouldContinueHallExecutionChain(
+  directive: HallRuntimeChainDirective | undefined,
+  completedTurns: number,
+  automaticTurnBudget: number,
+): boolean {
+  return directive?.nextAction === "continue" && completedTurns + 1 < automaticTurnBudget;
+}
+
+function buildHallExecutionContinuationNote(
+  taskCard: HallTaskCard,
+  directive: HallRuntimeChainDirective | undefined,
+  completedTurns: number,
+  automaticTurnBudget: number,
+): string {
+  const focus = directive?.nextStep?.trim();
+  return [
+    `Continue the same execution chain in the current session.`,
+    `Automatic execution turn ${completedTurns + 1} of ${automaticTurnBudget}.`,
+    focus ? `Focus next on: ${focus}` : "",
+    taskCard.latestSummary ? `Most recent summary: ${taskCard.latestSummary}` : "",
+  ].filter(Boolean).join(" ");
+}
+
+function buildMissingConcreteDeliverableSummary(taskCard: HallTaskCard, participant: HallParticipant): string {
+  const language = inferHallResponseLanguage(`${taskCard.title}\n${taskCard.description}\n${taskCard.latestSummary ?? ""}`);
+  const currentExecutionItem = getCurrentExecutionItem(taskCard);
+  const currentTask = currentExecutionItem?.task?.trim() || taskCard.doneWhen?.trim() || "";
+  if (language === "zh") {
+    return `${participant.displayName} 这一棒还没把具体交付物贴出来，继续当前步骤：${currentTask || "把结果直接贴回群里。"}`
+      .trim();
+  }
+  return `${participant.displayName} has not posted the concrete deliverable for this step yet. Continue the current step: ${currentTask || "post the actual result back into the hall."}`;
+}
+
+async function applyHallExecutionDirective(input: {
+  hall: CollaborationHall;
+  taskCard: HallTaskCard;
+  task?: ProjectTask;
+  participant: HallParticipant;
+  directive?: HallRuntimeChainDirective;
+  toolClient?: ToolClient;
+}): Promise<{ taskCard: HallTaskCard; task?: ProjectTask; generatedMessages: HallMessage[] }> {
+  const nextAction = input.directive?.nextAction;
+  const latestHall = await requireHall(input.hall.hallId);
+  const latestTaskCard = await requireTaskCard(input.taskCard.taskCardId);
+  const currentExecutionItem = getCurrentExecutionItem(latestTaskCard);
+  const queuedNextParticipantId = getExpectedNextExecutionOwner(latestTaskCard) || "";
+  if (!nextAction || nextAction === "continue") {
+    return { taskCard: latestTaskCard, task: input.task, generatedMessages: [] };
+  }
+
+  if (nextAction === "blocked") {
+    const taskCard = (
+      await updateHallTaskCard({
+        taskCardId: latestTaskCard.taskCardId,
+        stage: "blocked",
+        status: "blocked",
+        currentExecutionItem: getCurrentExecutionItem(latestTaskCard),
+      })
+    ).taskCard;
+    const task = input.task
+      ? (await patchTask({
+          taskId: input.task.taskId,
+          projectId: input.task.projectId,
+          status: "blocked",
+          owner: input.participant.displayName,
+          roomId: input.taskCard.roomId,
+        })).task
+      : undefined;
+    return {
+      taskCard,
+      task,
+      generatedMessages: [
+        await appendHallSystemMessage({
+          hallId: input.hall.hallId,
+          projectId: input.taskCard.projectId,
+          taskId: input.taskCard.taskId,
+          taskCardId: input.taskCard.taskCardId,
+          roomId: input.taskCard.roomId,
+          content: buildBlockedExecutionSummary(taskCard, input.participant),
+          payload: {
+            taskStage: "blocked",
+            taskStatus: "blocked",
+            status: "execution_blocked",
+          },
+        }),
+      ],
+    };
+  }
+
+  if (nextAction === "review" || nextAction === "done") {
+    const explicitNextParticipant = input.directive?.executor
+      ? findParticipant(latestHall.participants, input.directive.executor)
+      : undefined;
+    const nextParticipant = explicitNextParticipant
+      ?? (queuedNextParticipantId
+      ? findParticipant(latestHall.participants, queuedNextParticipantId)
+      : undefined);
+    if (nextParticipant && nextParticipant.participantId !== input.participant.participantId) {
+      const handoff = buildAutomaticRuntimeHandoffInput(
+        latestTaskCard,
+        input.task,
+        input.participant,
+        nextParticipant,
+        input.directive,
+      );
+      const handedOff = await recordHallTaskHandoff({
+        taskCardId: latestTaskCard.taskCardId,
+        fromParticipantId: input.participant.participantId,
+        toParticipantId: nextParticipant.participantId,
+        handoff,
+      }, {
+        toolClient: input.toolClient,
+      });
+      return {
+        taskCard: handedOff.taskCard ?? latestTaskCard,
+        task: handedOff.task ?? input.task,
+        generatedMessages: handedOff.generatedMessages,
+      };
+    }
+    const taskCard = (
+      await updateHallTaskCard({
+        taskCardId: latestTaskCard.taskCardId,
+        stage: "review",
+        status: "in_progress",
+        currentExecutionItem: getCurrentExecutionItem(latestTaskCard),
+      })
+    ).taskCard;
+    const task = input.task
+      ? (await patchTask({
+          taskId: input.task.taskId,
+          projectId: input.task.projectId,
+          status: "in_progress",
+          owner: input.participant.displayName,
+          roomId: input.taskCard.roomId,
+        })).task
+      : undefined;
+    return {
+      taskCard,
+      task,
+      generatedMessages: [
+        await appendHallSystemMessage({
+          hallId: input.hall.hallId,
+          projectId: input.taskCard.projectId,
+          taskId: input.taskCard.taskId,
+          taskCardId: input.taskCard.taskCardId,
+          roomId: input.taskCard.roomId,
+          content: buildReadyForReviewSummary(taskCard, input.participant),
+          payload: {
+            artifactRefs: task?.artifacts,
+            taskStage: "review",
+            taskStatus: "in_progress",
+            status: "execution_ready_for_review",
+          },
+        }),
+      ],
+    };
+  }
+
+  if (nextAction === "handoff") {
+    const plannedNextParticipantId = getExpectedNextExecutionOwner(latestTaskCard) || "";
+    const explicitNextParticipant = input.directive?.executor
+      ? findParticipant(latestHall.participants, input.directive.executor)
+      : undefined;
+    const nextParticipantId =
+      explicitNextParticipant && plannedNextParticipantId && explicitNextParticipant.participantId !== plannedNextParticipantId
+        ? plannedNextParticipantId
+        : (
+          explicitNextParticipant?.participantId
+          || plannedNextParticipantId
+        );
+    const nextParticipant = nextParticipantId
+      ? findParticipant(latestHall.participants, nextParticipantId)
+      : undefined;
+    if (!nextParticipant || nextParticipant.participantId === input.participant.participantId) {
+      return applyHallExecutionDirective({
+        ...input,
+        hall: latestHall,
+        taskCard: latestTaskCard,
+        directive: {
+          ...input.directive,
+          nextAction: "review",
+        },
+      });
+    }
+    const handoff = buildAutomaticRuntimeHandoffInput(
+      latestTaskCard,
+      input.task,
+      input.participant,
+      nextParticipant,
+      input.directive,
+    );
+    const handedOff = await recordHallTaskHandoff({
+      taskCardId: latestTaskCard.taskCardId,
+      fromParticipantId: input.participant.participantId,
+      toParticipantId: nextParticipant.participantId,
+      handoff,
+    }, {
+      toolClient: input.toolClient,
+    });
+    return {
+      taskCard: handedOff.taskCard ?? latestTaskCard,
+      task: handedOff.task ?? input.task,
+      generatedMessages: handedOff.generatedMessages,
+    };
+  }
+
+  return { taskCard: latestTaskCard, task: input.task, generatedMessages: [] };
+}
+
+function buildAutomaticRuntimeHandoffInput(
+  taskCard: HallTaskCard,
+  task: ProjectTask | undefined,
+  fromParticipant: HallParticipant,
+  toParticipant: HallParticipant,
+  directive: HallRuntimeChainDirective | undefined,
+): CreateStructuredHandoffInput {
+  const language = inferHallResponseLanguage(`${taskCard.title}\n${taskCard.description}\n${taskCard.latestSummary ?? ""}`);
+  const currentExecutionItem = getCurrentExecutionItem(taskCard);
+  const nextExecutionItem = findExecutionItemForParticipant(taskCard, toParticipant.participantId);
+  const currentResult = taskCard.latestSummary?.trim()
+    || directive?.nextStep?.trim()
+    || (language === "zh"
+      ? `${fromParticipant.displayName} 已完成当前这一步。`
+      : `${fromParticipant.displayName} completed the current execution item.`);
+  const goal = nextExecutionItem?.task?.trim()
+    || directive?.nextStep?.trim()
+    || currentExecutionItem?.handoffWhen?.trim()
+    || taskCard.doneWhen?.trim()
+    || (language === "zh" ? "继续推进下一步执行。" : "Continue the next execution step.");
+  const doneWhen = nextExecutionItem?.handoffWhen?.trim()
+    || taskCard.doneWhen?.trim()
+    || nextExecutionItem?.task?.trim()
+    || (language === "zh" ? "这一轮产出已可评审。" : "This pass is reviewable.");
+  return {
+    goal,
+    currentResult,
+    doneWhen,
+    blockers: taskCard.blockers,
+    nextOwner: toParticipant.displayName,
+    requiresInputFrom: taskCard.requiresInputFrom,
+    artifactRefs: task?.artifacts,
+  };
+}
+
+async function appendGeneratedHallReply(
+  hall: CollaborationHall,
+  taskCard: HallTaskCard,
+  participant: HallParticipant,
+  task: ProjectTask | undefined,
+  triggerMessage: HallMessage | undefined,
+  toolClient: ToolClient | undefined,
+): Promise<{ message?: HallMessage; taskCard: HallTaskCard }> {
+  if (taskCard.stage === "execution") {
+    const draft = buildGeneratedHallReply(hall, taskCard, participant, task);
+    const message = await appendStreamedGeneratedHallMessage({
+      hallId: hall.hallId,
+      kind: draft.kind,
+      participant,
+      content: draft.content,
+      targetParticipantIds: [],
+      projectId: taskCard.projectId,
+      taskId: taskCard.taskId,
+      taskCardId: taskCard.taskCardId,
+      roomId: taskCard.roomId,
+      payload: draft.payload,
+    });
+    return { message, taskCard };
+  }
+
+  let runtimeResult: HallRuntimeDispatchResult | undefined;
+  let failureMessage: HallMessage | undefined;
+  if (canDispatchHallToRuntime(toolClient, participant)) {
+    try {
+      const recentThreadMessages = await loadRecentHallThreadMessages(taskCard);
+      runtimeResult = await dispatchHallRuntimeTurn({
+        client: toolClient,
+        hall,
+        taskCard,
+        participant,
+        task,
+        triggerMessage,
+        recentThreadMessages,
+        mode: "discussion",
+      });
+    } catch (error) {
+      failureMessage = await appendRuntimeFailureHallMessage(hall, taskCard, participant, error);
+    }
+  }
+  if (runtimeResult?.canceled) {
+    return { taskCard };
+  }
+
+  const draft = runtimeResult
+    ? {
+        kind: runtimeResult.kind,
+        content: runtimeResult.content,
+        payload: runtimeResult.payload,
+      }
+    : failureMessage
+      ? {
+          kind: failureMessage.kind,
+          content: failureMessage.content,
+          payload: failureMessage.payload,
+        }
+      : buildGeneratedHallReply(hall, taskCard, participant, task);
+
+  const message = failureMessage
+    ?? (runtimeResult
+      ? await appendPersistedHallMessage({
+          hallId: hall.hallId,
+          kind: draft.kind,
+          participant,
+          content: draft.content,
+          targetParticipantIds: [],
+          projectId: taskCard.projectId,
+          taskId: taskCard.taskId,
+          taskCardId: taskCard.taskCardId,
+          roomId: taskCard.roomId,
+          payload: draft.payload,
+        })
+      : await appendStreamedGeneratedHallMessage({
+          hallId: hall.hallId,
+          kind: draft.kind,
+          participant,
+          content: draft.content,
+          targetParticipantIds: [],
+          projectId: taskCard.projectId,
+          taskId: taskCard.taskId,
+          taskCardId: taskCard.taskCardId,
+          roomId: taskCard.roomId,
+          payload: draft.payload,
+      }));
+
+  if (!message) {
+    return { taskCard };
+  }
+
+  const persistedTaskCard = await requireTaskCard(taskCard.taskCardId);
+  if (persistedTaskCard.stage !== "discussion") {
+    return { message, taskCard: persistedTaskCard };
+  }
+  const completedTaskCard = markDiscussionSpeakerComplete(persistedTaskCard, participant.participantId, message.createdAt);
+  const discussionCycleCompleted =
+    JSON.stringify(completedTaskCard.discussionCycle ?? null) !== JSON.stringify(persistedTaskCard.discussionCycle ?? null);
+  let nextTaskCard = completedTaskCard;
+  if (discussionCycleCompleted) {
+    nextTaskCard = (
+      await updateHallTaskCard({
+        taskCardId: taskCard.taskCardId,
+        discussionCycle: completedTaskCard.discussionCycle,
+      })
+    ).taskCard;
+  }
+  if (
+    draft.payload?.proposal
+    || draft.payload?.decision
+    || draft.payload?.doneWhen
+    || draft.payload?.nextOwnerParticipantId
+    || draft.payload?.executionOrder
+    || draft.payload?.executionItems
+  ) {
+    const preservePersistedExecutionPlan =
+      persistedTaskCard.updatedAt !== taskCard.updatedAt
+      && (
+        persistedTaskCard.plannedExecutionItems.length > 0
+        || persistedTaskCard.plannedExecutionOrder.length > 0
+      );
+    const nextExecutionOrder = preservePersistedExecutionPlan
+      ? nextTaskCard.plannedExecutionOrder
+      : draft.payload.executionOrder ?? nextTaskCard.plannedExecutionOrder;
+    const nextExecutionItems = preservePersistedExecutionPlan
+      ? nextTaskCard.plannedExecutionItems
+      : draft.payload.executionItems
+      ?? (draft.payload.executionOrder
+        ? deriveExecutionItemsFromOrder(
+            hall.participants,
+            nextExecutionOrder,
+            nextTaskCard,
+            { existingItems: nextTaskCard.plannedExecutionItems, primaryDoneWhen: draft.payload.doneWhen ?? nextTaskCard.doneWhen },
+          )
+        : nextTaskCard.plannedExecutionItems);
+    nextTaskCard = (
+      await updateHallTaskCard({
+        taskCardId: taskCard.taskCardId,
+        proposal: draft.payload.proposal ?? nextTaskCard.proposal,
+        decision: draft.payload.decision ?? nextTaskCard.decision,
+        doneWhen: draft.payload.doneWhen ?? nextTaskCard.doneWhen,
+        plannedExecutionOrder: nextExecutionOrder,
+        plannedExecutionItems: nextExecutionItems,
+        currentOwnerParticipantId: nextTaskCard.currentOwnerParticipantId,
+        currentOwnerLabel: nextTaskCard.currentOwnerLabel,
+        latestSummary: draft.content,
+        discussionCycle: nextTaskCard.discussionCycle,
+      })
+    ).taskCard;
+  }
+
+  if (runtimeResult?.taskCardPatch || runtimeResult?.sessionKey) {
+    nextTaskCard = await linkHallRuntimeArtifacts({
+      taskCard: nextTaskCard,
+      task,
+      participant,
+      message,
+      runtimeResult,
+    });
+  }
+
+  if (!failureMessage && participant.semanticRole === "manager" && nextTaskCard.stage === "discussion") {
+    nextTaskCard = closeDiscussionCycle(nextTaskCard, message.createdAt);
+    nextTaskCard = (
+      await updateHallTaskCard({
+        taskCardId: nextTaskCard.taskCardId,
+        discussionCycle: nextTaskCard.discussionCycle,
+        latestSummary: draft.content,
+      })
+    ).taskCard;
+  }
+
+  return { message, taskCard: nextTaskCard };
+}
+
+async function appendStreamedGeneratedHallMessage(input: {
+  hallId: string;
+  kind: HallMessage["kind"];
+  participant: HallParticipant;
+  content: string;
+  targetParticipantIds: string[];
+  projectId: string;
+  taskId: string;
+  taskCardId: string;
+  roomId?: string;
+  payload?: HallMessage["payload"];
+}): Promise<HallMessage | undefined> {
+  const draftId = await streamHallDraftReply({
+    hallId: input.hallId,
+    taskCardId: input.taskCardId,
+    projectId: input.projectId,
+    taskId: input.taskId,
+    roomId: input.roomId,
+    authorParticipantId: input.participant.participantId,
+    authorLabel: input.participant.displayName,
+    authorSemanticRole: input.participant.semanticRole,
+    messageKind: input.kind,
+    content: input.content,
+  });
+  if (isHallDraftCanceled(draftId)) {
+    return undefined;
+  }
+  const message = (
+    await appendHallMessage({
+      hallId: input.hallId,
+      kind: input.kind,
+      authorParticipantId: input.participant.participantId,
+      authorLabel: input.participant.displayName,
+      authorSemanticRole: input.participant.semanticRole,
+      content: input.content,
+      targetParticipantIds: input.targetParticipantIds,
+      projectId: input.projectId,
+      taskId: input.taskId,
+      taskCardId: input.taskCardId,
+      roomId: input.roomId,
+      payload: input.payload,
+    })
+  ).message;
+  completeHallDraftReply({
+    hallId: input.hallId,
+    taskCardId: input.taskCardId,
+    projectId: input.projectId,
+    taskId: input.taskId,
+    roomId: input.roomId,
+    draftId,
+    messageId: message.messageId,
+    content: input.content,
+  });
+  return message;
+}
+
+async function appendPersistedHallMessage(input: {
+  hallId: string;
+  kind: HallMessage["kind"];
+  participant: HallParticipant;
+  content: string;
+  targetParticipantIds: string[];
+  projectId: string;
+  taskId: string;
+  taskCardId: string;
+  roomId?: string;
+  payload?: HallMessage["payload"];
+}): Promise<HallMessage> {
+  return (
+    await appendHallMessage({
+      hallId: input.hallId,
+      kind: input.kind,
+      authorParticipantId: input.participant.participantId,
+      authorLabel: input.participant.displayName,
+      authorSemanticRole: input.participant.semanticRole,
+      content: input.content,
+      targetParticipantIds: input.targetParticipantIds,
+      projectId: input.projectId,
+      taskId: input.taskId,
+      taskCardId: input.taskCardId,
+      roomId: input.roomId,
+      payload: input.payload,
+    })
+  ).message;
+}
+
+async function appendHallSystemMessage(input: {
+  hallId: string;
+  content: string;
+  projectId: string;
+  taskId: string;
+  taskCardId: string;
+  roomId?: string;
+  payload?: HallMessage["payload"];
+}): Promise<HallMessage> {
+  return (
+    await appendHallMessage({
+      hallId: input.hallId,
+      kind: "system",
+      authorParticipantId: "system",
+      authorLabel: "System",
+      content: input.content,
+      targetParticipantIds: [],
+      projectId: input.projectId,
+      taskId: input.taskId,
+      taskCardId: input.taskCardId,
+      roomId: input.roomId,
+      payload: input.payload,
+    })
+  ).message;
+}
+
+async function appendRuntimeFailureHallMessage(
+  hall: CollaborationHall,
+  taskCard: HallTaskCard,
+  participant: HallParticipant,
+  error: unknown,
+): Promise<HallMessage> {
+  const detail = error instanceof Error ? error.message : "unknown runtime error";
+  return (
+    await appendHallMessage({
+      hallId: hall.hallId,
+      kind: "system",
+      authorParticipantId: "system",
+      authorLabel: "System",
+      content: `Runtime dispatch to ${participant.displayName} failed: ${detail}`,
+      projectId: taskCard.projectId,
+      taskId: taskCard.taskId,
+      taskCardId: taskCard.taskCardId,
+      roomId: taskCard.roomId,
+      payload: {
+        projectId: taskCard.projectId,
+        taskId: taskCard.taskId,
+        taskCardId: taskCard.taskCardId,
+        roomId: taskCard.roomId,
+        taskStage: taskCard.stage,
+        taskStatus: taskCard.status,
+        status: "runtime_error",
+      },
+    })
+  ).message;
+}
+
+async function linkHallRuntimeArtifacts(input: {
+  taskCard: HallTaskCard;
+  task?: ProjectTask;
+  participant: HallParticipant;
+  message: HallMessage;
+  runtimeResult: HallRuntimeDispatchResult;
+}): Promise<HallTaskCard> {
+  const nextSessionKeys = input.runtimeResult.sessionKey
+    ? [...new Set([...input.taskCard.sessionKeys, input.runtimeResult.sessionKey])]
+    : input.taskCard.sessionKeys;
+  let taskCard = input.taskCard;
+  const patch = input.runtimeResult.taskCardPatch ?? {};
+  const shouldPatchTaskCard =
+    nextSessionKeys.join("|") !== input.taskCard.sessionKeys.join("|")
+    || patch.proposal !== undefined
+    || patch.decision !== undefined
+    || patch.doneWhen !== undefined
+    || patch.currentOwnerParticipantId !== undefined
+    || patch.currentOwnerLabel !== undefined
+    || patch.blockers !== undefined
+    || patch.requiresInputFrom !== undefined
+    || patch.latestSummary !== undefined;
+
+  if (shouldPatchTaskCard) {
+    taskCard = (
+      await updateHallTaskCard({
+        taskCardId: input.taskCard.taskCardId,
+        proposal: patch.proposal ?? input.taskCard.proposal,
+        decision: patch.decision ?? input.taskCard.decision,
+        doneWhen: patch.doneWhen ?? input.taskCard.doneWhen,
+        currentOwnerParticipantId: patch.currentOwnerParticipantId ?? input.taskCard.currentOwnerParticipantId,
+        currentOwnerLabel: patch.currentOwnerLabel ?? input.taskCard.currentOwnerLabel,
+        blockers: patch.blockers ?? input.taskCard.blockers,
+        requiresInputFrom: patch.requiresInputFrom ?? input.taskCard.requiresInputFrom,
+        latestSummary: patch.latestSummary ?? input.taskCard.latestSummary,
+        sessionKeys: nextSessionKeys,
+      })
+    ).taskCard;
+  }
+
+  if (input.task) {
+    const taskSessionKeys = input.runtimeResult.sessionKey
+      ? [...new Set([...(input.task.sessionKeys ?? []), input.runtimeResult.sessionKey])]
+      : input.task.sessionKeys;
+    const mergedArtifacts = mergeTaskArtifacts(input.task.artifacts, input.runtimeResult.payload?.artifactRefs);
+    if (
+      taskSessionKeys.join("|") !== (input.task.sessionKeys ?? []).join("|")
+      || !sameTaskArtifacts(input.task.artifacts, mergedArtifacts)
+    ) {
+      await patchTask({
+        taskId: input.task.taskId,
+        projectId: input.task.projectId,
+        sessionKeys: taskSessionKeys,
+        artifacts: mergedArtifacts,
+      });
+    }
+  }
+
+  if (taskCard.roomId) {
+    await appendChatMessage({
+      roomId: taskCard.roomId,
+      kind: mapHallKindToRoomKind(input.message.kind),
+      authorRole: toRoomParticipantRole(input.participant),
+      authorLabel: input.participant.displayName,
+      content: input.message.content,
+      sessionKey: input.runtimeResult.sessionKey,
+      payload: {
+        proposal: input.message.payload?.proposal,
+        decision: input.message.payload?.decision,
+        doneWhen: input.message.payload?.doneWhen,
+        status: input.message.payload?.status,
+        taskStatus: input.message.payload?.taskStatus ?? taskCard.status,
+        reviewOutcome: input.message.payload?.reviewOutcome,
+        sessionKey: input.runtimeResult.sessionKey,
+        sourceSessionKey: input.runtimeResult.sessionKey,
+      },
+    });
+  }
+
+  return taskCard;
+}
+
+function mergeTaskArtifacts(existing: TaskArtifact[] | undefined, incoming: TaskArtifact[] | undefined): TaskArtifact[] {
+  const merged = new Map<string, TaskArtifact>();
+  for (const artifact of [...(existing ?? []), ...(incoming ?? [])]) {
+    if (!artifact || !artifact.location) continue;
+    const normalized: TaskArtifact = {
+      artifactId: artifact.artifactId?.trim() || artifact.location.trim(),
+      type: artifact.type,
+      label: artifact.label?.trim() || artifact.location.trim(),
+      location: artifact.location.trim(),
+    };
+    merged.set(normalized.artifactId, normalized);
+  }
+  return Array.from(merged.values());
+}
+
+function sameTaskArtifacts(left: TaskArtifact[] | undefined, right: TaskArtifact[] | undefined): boolean {
+  return JSON.stringify(mergeTaskArtifacts(left, [])) === JSON.stringify(mergeTaskArtifacts(right, []));
+}
+
+function mapHallKindToRoomKind(kind: HallMessage["kind"]): MessageKind {
+  switch (kind) {
+    case "proposal":
+    case "decision":
+    case "handoff":
+    case "status":
+    case "result":
+      return kind;
+    default:
+      return "chat";
+  }
+}
+
+function buildGeneratedHallReply(
+  hall: CollaborationHall,
+  taskCard: HallTaskCard,
+  participant: HallParticipant,
+  task: ProjectTask | undefined,
+): { kind: HallMessage["kind"]; content: string; payload?: HallMessage["payload"] } {
+  const language = inferHallResponseLanguage(`${taskCard.title}\n${taskCard.description}\n${task?.title ?? ""}`);
+  const title = taskCard.title;
+  if (taskCard.stage === "execution") {
+    return {
+      kind: "status",
+      content: language === "zh"
+        ? `${participant.displayName} 继续做这一棒，下一条只贴结果和下一步。`
+        : `${participant.displayName} is on this step and will post the concrete result next.`,
+      payload: {
+        taskStage: "execution",
+        taskStatus: "in_progress",
+        nextOwnerParticipantId: participant.participantId,
+        status: "execution_update",
+      },
+    };
+  }
+  if (taskCard.stage === "review") {
+    return {
+      kind: "review",
+      content: language === "zh"
+        ? `${participant.displayName} 先只挑必须改的点；没硬伤就直接让下一步继续。`
+        : `${participant.displayName} is checking only the must-fix issues; if there is no hard blocker, the next step should continue.`,
+      payload: {
+        taskStage: "review",
+        taskStatus: taskCard.status,
+        status: "review_in_progress",
+      },
+    };
+  }
+  if (participant.semanticRole === "planner") {
+    const proposal = buildPlannerDiscussionProposal(taskCard, language);
+    return {
+      kind: "proposal",
+      content: proposal,
+      payload: {
+        proposal,
+        taskStage: "discussion",
+        taskStatus: taskCard.status,
+      },
+    };
+  }
+  if (participant.semanticRole === "coder") {
+    const proposal = buildImplementerDiscussionProposal(taskCard, language);
+    return {
+      kind: "proposal",
+      content: proposal,
+      payload: {
+        proposal,
+        taskStage: "discussion",
+        taskStatus: taskCard.status,
+      },
+    };
+  }
+  if (participant.semanticRole === "reviewer") {
+    const proposal = buildReviewerDiscussionProposal(taskCard, language);
+    return {
+      kind: "proposal",
+      content: proposal,
+      payload: {
+        proposal,
+        taskStage: "discussion",
+        taskStatus: taskCard.status,
+      },
+    };
+  }
+  if (participant.semanticRole === "manager") {
+    const executor = pickRecommendedExecutor(hall, taskCard, task);
+    const suggestedPlan = buildSuggestedExecutionPlan(hall, taskCard, executor.participantId, task);
+    const executionOrder = suggestedPlan.executionOrder;
+    const executionItems = suggestedPlan.executionItems;
+    const decision = buildManagerDiscussionDecision(taskCard, executor.displayName, language);
+    const preservedProposal = taskCard.proposal?.trim()
+      || taskCard.latestSummary?.trim()
+      || (language === "zh"
+        ? `先把“${title}”这一轮讨论收成一版可执行方案。`
+        : `Turn this discussion about "${title}" into an executable first plan.`);
+    const doneWhen = task?.definitionOfDone.length
+      ? task.definitionOfDone.join("; ")
+      : buildSuggestedDoneWhen(taskCard, language);
+    const actionSummary = executionItems.map((item, index) => {
+      const participantLabel = findParticipant(hall.participants, item.participantId)?.displayName ?? item.participantId;
+      const nextLabel = item.handoffToParticipantId
+        ? (findParticipant(hall.participants, item.handoffToParticipantId)?.displayName ?? item.handoffToParticipantId)
+        : undefined;
+      return language === "zh"
+        ? `${index + 1}. ${participantLabel}：${item.task}${nextLabel ? `；然后交给 ${nextLabel}` : ""}`
+        : `${index + 1}. ${participantLabel}: ${item.task}${nextLabel ? `; then hand off to ${nextLabel}` : ""}`;
+    }).join(language === "zh" ? "；" : "; ");
+    return {
+      kind: "decision",
+      content: language === "zh"
+        ? `${decision} 行动项：${actionSummary}。完成标准：${doneWhen}。`
+        : `${decision} Action items: ${actionSummary}. Done when: ${doneWhen}.`,
+      payload: {
+        proposal: preservedProposal,
+        decision,
+        doneWhen,
+        executionOrder,
+        executionItems,
+        nextOwnerParticipantId: executor.participantId,
+        taskStage: "discussion",
+        taskStatus: taskCard.status,
+      },
+    };
+  }
+  return {
+    kind: "chat",
+    content: language === "zh"
+      ? `${participant.displayName} 已经就位；如果需要补充这个话题的特定视角，可以继续点名我。`
+      : `${participant.displayName} is available for targeted input on "${title}" if needed.`,
+    payload: {
+      taskStage: taskCard.stage,
+      taskStatus: taskCard.status,
+    },
+  };
+}
+
+function inferHallDiscussionDomain(taskCard: HallTaskCard, task: ProjectTask | undefined): HallDiscussionDomain {
+  return inferHallDiscussionDomainFromText(`${taskCard.title}\n${taskCard.description}\n${task?.title ?? ""}`);
+}
+
+function buildPlannerDiscussionProposal(taskCard: HallTaskCard, language: HallResponseLanguage): string {
+  const title = taskCard.title;
+  if (language === "zh") {
+    return `关于“${title}”，我想先把这件事说直白：这次最想让人一眼看懂什么，第一版最小要证明什么，以及先拿哪个具体例子来证明它。先把目标、受众和第一版边界说清楚，再决定谁去做第一步。`;
+  }
+  return `For "${title}", I want to make the goal concrete first: what the audience should understand immediately, what the smallest first proof looks like, and which example will make that obvious. We should clarify the goal, audience, and first-pass boundary before assigning the first owner.`;
+}
+
+function buildImplementerDiscussionProposal(taskCard: HallTaskCard, language: HallResponseLanguage): string {
+  const title = taskCard.title;
+  if (language === "zh") {
+    return `“${title}”更务实的推进方式是：先拿一个最小但能说明问题的具体例子，把第一版直接做成能被看、被比、被改的东西。先别一次铺太大，先让大家看到这件事到底值不值得继续做。`;
+  }
+  return `A practical way to move "${title}" forward is to pick one small but revealing example and turn it into a reviewable first pass. Start with something people can see, compare, and react to instead of trying to solve the whole thing at once.`;
+}
+
+function buildReviewerDiscussionProposal(taskCard: HallTaskCard, language: HallResponseLanguage): string {
+  const title = taskCard.title;
+  if (language === "zh") {
+    return `我这边最在意的是：这件事现在是不是已经说到了用户真正关心的点，第一版范围是不是够小够清楚，以及做出来之后别人能不能一眼判断它有没有打到点上。`;
+  }
+  return `My review lens for "${title}" is simple: are we actually answering the user's goal, is the first pass small and concrete enough, and will people be able to judge quickly whether it works?`;
+}
+
+function buildManagerDiscussionDecision(taskCard: HallTaskCard, executorLabel: string, language: HallResponseLanguage): string {
+  if (language === "zh") {
+    return `先把这一轮讨论收成一个明确目标，再把第一版最小可评审结果交给 ${executorLabel}。第一棒不要做满，先做出一个能直接说明方向的结果，再继续往下推。`;
+  }
+  return `We should settle the goal of this discussion, then hand the smallest reviewable first pass to ${executorLabel}. The first owner should prove direction quickly instead of trying to finish everything at once.`;
+}
+
+function buildSuggestedDoneWhen(taskCard: HallTaskCard, language: HallResponseLanguage): string {
+  if (language === "zh") {
+    return `针对“${taskCard.title}”，需要有一个别人一眼就能看懂的第一版结果、明确 owner、明确 next action，以及能继续往下推进的下一棒。`;
+  }
+  return `there is a reviewable first result for "${taskCard.title}", a clear owner, a clear next action, and the next handoff can continue without guesswork`;
+}
+
+function inferHallResponseLanguage(source: string | undefined): HallResponseLanguage {
+  const value = String(source ?? "").trim();
+  if (!value) return "en";
+  const cjkMatches = value.match(/[\u4e00-\u9fff]/g) ?? [];
+  const latinMatches = value.match(/[A-Za-z]/g) ?? [];
+  if (cjkMatches.length > 0) return "zh";
+  if (latinMatches.length > 0) return "en";
+  return "en";
+}
+
+function buildSuggestedExecutionOrder(
+  hall: CollaborationHall,
+  taskCard: HallTaskCard,
+  recommendedOwnerParticipantId: string,
+): string[] {
+  const ordered = [
+    recommendedOwnerParticipantId,
+    ...taskCard.requiresInputFrom,
+    ...taskCard.mentionedParticipantIds,
+  ];
+  return sanitizeExecutionOrder(hall.participants, ordered);
+}
+
+function buildDynamicDiscussionParticipantQueue(
+  hall: CollaborationHall,
+  taskCard: HallTaskCard,
+  task?: ProjectTask,
+  triggerText?: string,
+): string[] {
+  const normalizedTrigger = triggerText ?? `${taskCard.title}\n${taskCard.description}`;
+  const wantsContinuation = requestsDiscussionContinuation(normalizedTrigger);
+  const wantsDecision =
+    !wantsContinuation
+    && classifyHallDiscussionFollowupIntent(normalizedTrigger) === "decision_request";
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const push = (participantId: string | undefined) => {
+    if (!participantId || seen.has(participantId)) return;
+    const participant = findParticipant(hall.participants, participantId);
+    if (!participant || !participant.active) return;
+    seen.add(participantId);
+    ordered.push(participantId);
+  };
+
+  if (wantsDecision) {
+    push(pickPrimaryParticipantByRole(hall.participants, "manager")?.participantId);
+  }
+  for (const participantId of [...taskCard.mentionedParticipantIds, ...taskCard.requiresInputFrom]) {
+    push(participantId);
+  }
+  for (const role of discussionRoleOrder().filter((role) => wantsDecision || role !== "manager")) {
+    push(pickParticipantForRole(hall.participants, role)?.participantId);
+  }
+  if (wantsDecision) {
+    push(pickPrimaryParticipantByRole(hall.participants, "manager")?.participantId);
+  }
+
+  if (ordered.length < 2) {
+    for (const role of ["planner", "coder", "reviewer", "generalist", "manager"] as HallSemanticRole[]) {
+      if (!wantsDecision && role === "manager") continue;
+      push(pickParticipantForRole(hall.participants, role)?.participantId);
+      if (ordered.length >= 2) break;
+    }
+  }
+
+  return ordered.slice(0, wantsDecision ? 3 : 2);
+}
+
+function discussionRoleOrder(): HallSemanticRole[] {
+  return ["planner", "coder", "reviewer", "generalist", "manager"];
+}
+
+function recommendedExecutorRoleOrder(domain: HallDiscussionDomain): HallSemanticRole[] {
+  if (domain === "engineering") return ["coder", "planner", "manager"];
+  if (domain === "creative") return ["planner", "coder", "generalist"];
+  if (domain === "analysis") return ["planner", "coder", "reviewer"];
+  if (domain === "product") return ["planner", "manager", "coder"];
+  if (domain === "research") return ["planner", "reviewer", "manager"];
+  if (domain === "operations") return ["manager", "planner", "reviewer"];
+  return ["planner", "generalist", "manager", "coder"];
+}
+
+function pickParticipantForRole(
+  participants: HallParticipant[],
+  role: HallSemanticRole,
+): HallParticipant | undefined {
+  if (role === "generalist") {
+    return participants.find((participant) => participant.active && participant.semanticRole === "generalist");
+  }
+  return pickPrimaryParticipantByRole(participants, role);
+}
+
+async function ensureHallContext(
+  hallId = DEFAULT_COLLABORATION_HALL_ID,
+  options: HallReadOptions = {},
+): Promise<{ hall: CollaborationHall }> {
+  const roster = await loadBestEffortAgentRoster();
+  const participants = resolveHallParticipantsFromRoster(roster.entries);
+  const defaultHall = await ensureDefaultCollaborationHall(participants, { persist: options.persist !== false });
+  const store = await loadCollaborationHallStore();
+  const hall =
+    store.halls.find((item) => item.hallId === hallId)
+    ?? store.halls.find((item) => item.hallId === DEFAULT_COLLABORATION_HALL_ID)
+    ?? (defaultHall.hallId === hallId || hallId === DEFAULT_COLLABORATION_HALL_ID ? defaultHall : undefined);
+  if (!hall) {
+    throw new CollaborationHallStoreValidationError(`hall '${hallId}' was not found.`, ["hallId"], 404);
+  }
+  return { hall };
+}
+
+async function requireHall(hallId: string, options: HallReadOptions = {}): Promise<CollaborationHall> {
+  return (await ensureHallContext(hallId, options)).hall;
+}
+
+async function requireTaskCard(taskCardId: string): Promise<HallTaskCard> {
+  const store = await loadCollaborationTaskCardStore();
+  const taskCard = getHallTaskCard(store, taskCardId);
+  if (!taskCard) {
+    throw new CollaborationHallStoreValidationError(`task card '${taskCardId}' was not found.`, ["taskCardId"], 404);
+  }
+  return taskCard;
+}
+
+async function requireTaskCardByProjectTask(projectId: string, taskId: string): Promise<HallTaskCard> {
+  const store = await loadCollaborationTaskCardStore();
+  const taskCard = getHallTaskCardByTask(store, projectId, taskId);
+  if (!taskCard) {
+    throw new CollaborationHallStoreValidationError(`task '${projectId}:${taskId}' does not have a hall task card yet.`, ["taskId"], 404);
+  }
+  return taskCard;
+}
+
+async function refreshHallAndTaskSummary(
+  hallId: string,
+  taskCard: HallTaskCard,
+): Promise<{ hall: CollaborationHall; hallSummary: CollaborationHallSummary; taskCard: HallTaskCard; taskSummary: HallTaskSummary }> {
+  const hall = await requireHall(hallId);
+  const [messageStore, taskCardStore] = await Promise.all([
+    loadCollaborationHallMessageStore(),
+    loadCollaborationTaskCardStore(),
+  ]);
+  const taskCards = listHallTaskCards(taskCardStore, { hallId });
+  const updatedTaskCard = taskCards.find((item) => item.taskCardId === taskCard.taskCardId) ?? taskCard;
+  const messages = listHallMessages(messageStore, { hallId });
+  const hallSummary = (await upsertCollaborationHallSummary(hall, messages, taskCards)).summary;
+  const taskSummary = (await upsertHallTaskSummary(updatedTaskCard, messages)).summary;
+  return {
+    hall,
+    hallSummary,
+    taskCard: updatedTaskCard,
+    taskSummary,
+  };
+}
+
+async function ensureHallProject(projectId: string): Promise<void> {
+  const store = await loadProjectStore();
+  if (store.projects.some((project) => project.projectId === projectId)) return;
+  const now = new Date().toISOString();
+  store.projects.push({
+    projectId,
+    title: projectId === DEFAULT_COLLABORATION_HALL_PROJECT_ID ? "Collaboration Hall" : projectId,
+    status: "active",
+    owner: "operator",
+    budget: {},
+    updatedAt: now,
+  });
+  store.updatedAt = now;
+  await saveProjectStore(store);
+}
+
+function findParticipant(participants: HallParticipant[], participantId: string | undefined): HallParticipant | undefined {
+  if (!participantId) return undefined;
+  const normalized = String(participantId).trim().toLowerCase();
+  return participants.find((participant) => {
+    if (participant.participantId === participantId) return true;
+    if (participant.displayName.trim().toLowerCase() === normalized) return true;
+    return participant.aliases.some((alias) => alias.trim().toLowerCase() === normalized);
+  });
+}
+
+function requireHallParticipant(
+  participants: HallParticipant[],
+  participantId: string,
+  field: string,
+): HallParticipant {
+  const participant = findParticipant(participants, participantId);
+  if (!participant) {
+    throw new CollaborationHallStoreValidationError(`participant '${participantId}' was not found.`, [field], 404);
+  }
+  return participant;
+}
+
+function pickRecommendedExecutor(
+  hall: CollaborationHall,
+  taskCard: HallTaskCard,
+  task?: ProjectTask,
+): HallParticipant {
+  if (taskCard.currentOwnerParticipantId) {
+    const existing = findParticipant(hall.participants, taskCard.currentOwnerParticipantId);
+    if (existing) return existing;
+  }
+  const domain = inferHallDiscussionDomain(taskCard, task);
+  for (const role of recommendedExecutorRoleOrder(domain)) {
+    const participant = pickParticipantForRole(hall.participants, role);
+    if (participant) return participant;
+  }
+  return pickPrimaryParticipantByRole(hall.participants, "planner")
+    ?? pickPrimaryParticipantByRole(hall.participants, "coder")
+    ?? hall.participants[0]
+    ?? {
+      participantId: "operator",
+      displayName: "Operator",
+      semanticRole: "generalist",
+      active: true,
+      aliases: ["Operator", "operator"],
+      isHuman: true,
+    };
+}
+
+function deriveTaskTitle(content: string): string {
+  const cleaned = content.trim().replace(/\s+/g, " ");
+  if (!cleaned) return "Untitled hall task";
+  const firstSentence = cleaned.split(/[\n。！？!?]/u).find((part) => part.trim().length > 0)?.trim() ?? cleaned;
+  return firstSentence.length > 90 ? `${firstSentence.slice(0, 87)}...` : firstSentence;
+}
+
+function buildTaskId(content: string): string {
+  const slug = content
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._:-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  const base = slug || "hall-task";
+  return `${base}-${randomUUID().slice(0, 8)}`;
+}
+
+function normalizeTaskKey(value: string | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function toRoomParticipantRole(participant: HallParticipant): RoomParticipantRole {
+  if (participant.semanticRole === "planner") return "planner";
+  if (participant.semanticRole === "reviewer") return "reviewer";
+  if (participant.semanticRole === "manager") return "manager";
+  return "coder";
+}
+
+function truncateLinkedRoomHandoffNote(note: string): string {
+  const trimmed = note.trim();
+  if (!trimmed) return trimmed;
+  return trimmed.length > 320 ? `${trimmed.slice(0, 317).trimEnd()}...` : trimmed;
+}
+
+async function requireLinkedRoom(roomId: string) {
+  const store = await loadChatRoomStore();
+  const room = getChatRoom(store, roomId);
+  if (!room) {
+    throw new CollaborationHallStoreValidationError(`linked room '${roomId}' was not found.`, ["roomId"], 404);
+  }
+  return room;
+}

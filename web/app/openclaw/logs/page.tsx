@@ -21,7 +21,10 @@ export default function OpenClawLogsPage() {
   const [limit, setLimit] = useState(100);
   const [logs, setLogs] = useState<OpenClawLogEntry[]>([]);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
   const [isPending, startTransition] = useTransition();
+  const hasInstances = instances.length > 0;
+  const canViewLogs = Boolean(selectedInstanceId);
 
   async function loadLogs(instanceId: string, nextLimit: number) {
     if (!instanceId) {
@@ -40,7 +43,12 @@ export default function OpenClawLogsPage() {
         setSelectedInstanceId(nextInstanceId);
         if (nextInstanceId) {
           await loadLogs(nextInstanceId, limit);
+          setMessage("limit 建議先維持在 100~200，避免畫面一次塞太多內容。");
+        } else {
+          setLogs([]);
+          setMessage("先建立 OpenClaw Instance，這裡才能查看 Gateway logs。");
         }
+        setError("");
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : "無法載入 OpenClaw Logs");
       }
@@ -49,12 +57,14 @@ export default function OpenClawLogsPage() {
 
   useEffect(() => {
     if (!selectedInstanceId) {
+      setLogs([]);
       return;
     }
 
     startTransition(async () => {
       try {
         await loadLogs(selectedInstanceId, limit);
+        setError("");
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : "無法切換 Logs 清單");
       }
@@ -63,9 +73,11 @@ export default function OpenClawLogsPage() {
 
   return (
     <OpenClawPageShell
-      title="OpenClaw Logs"
-      description="Logs 頁提供手動 refresh 與 limit 控制，讓營運人員能在不建立長連線的前提下查看 Gateway 日誌。"
+      title="Logs"
+      description="Logs 是 OpenClaw Control Center 內的 Admin Tools 分區，提供手動 refresh 與 limit 控制，方便在不建立長連線的前提下查看 Gateway 日誌。"
       roles={LOG_ROLES}
+      sectionGroup="Admin Tools"
+      sectionLabel="Logs"
     >
       <PixelCard title="Logs 查詢" eyebrow="Logs">
         <div className="grid gap-4 lg:grid-cols-[280px_140px_auto_1fr]">
@@ -73,6 +85,7 @@ export default function OpenClawLogsPage() {
             instances={instances}
             value={selectedInstanceId}
             onChange={setSelectedInstanceId}
+            disabled={!hasInstances || isPending}
           />
           <input
             value={String(limit)}
@@ -85,12 +98,13 @@ export default function OpenClawLogsPage() {
           <button
             type="button"
             onClick={() => selectedInstanceId && loadLogs(selectedInstanceId, limit)}
-            className="pixel-button bg-teal px-4 py-3 text-sm font-black tracking-[0.08em] text-white"
+            disabled={!canViewLogs || isPending}
+            className="pixel-button bg-teal px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
           >
             重新整理
           </button>
           <div className="border-4 border-ink bg-white px-4 py-3 text-sm text-slate-700">
-            {error ? <span className="text-coral">{error}</span> : "limit 建議先維持在 100~200，避免畫面一次塞太多內容。"}
+            {error ? <span className="text-coral">{error}</span> : message || "limit 建議先維持在 100~200，避免畫面一次塞太多內容。"}
           </div>
         </div>
       </PixelCard>

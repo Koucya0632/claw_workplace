@@ -23,6 +23,8 @@ export default function OpenClawDevicesPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [isPending, startTransition] = useTransition();
+  const hasInstances = instances.length > 0;
+  const canManageDevices = Boolean(selectedInstanceId);
 
   async function loadDevices(instanceId: string) {
     if (!instanceId) {
@@ -41,6 +43,10 @@ export default function OpenClawDevicesPage() {
         setSelectedInstanceId((current) => current || nextInstanceId);
         if (nextInstanceId) {
           await loadDevices(nextInstanceId);
+          setMessage("點擊按鈕後，只會鎖住對應設備的操作狀態。");
+        } else {
+          setDevices([]);
+          setMessage("先建立 OpenClaw Instance，這裡才會出現 Device 與授權操作。");
         }
         setError("");
       } catch (requestError) {
@@ -51,6 +57,7 @@ export default function OpenClawDevicesPage() {
 
   useEffect(() => {
     if (!selectedInstanceId) {
+      setDevices([]);
       return;
     }
 
@@ -64,6 +71,11 @@ export default function OpenClawDevicesPage() {
   }, [selectedInstanceId, startTransition]);
 
   async function handleDeviceAction(action: "approve" | "reject" | "revoke", deviceId: string) {
+    if (!selectedInstanceId) {
+      setError("請先建立並選擇 OpenClaw Instance。");
+      return;
+    }
+
     const busyKey = `${action}:${deviceId}`;
     setBusyActionKey(busyKey);
     setError("");
@@ -82,9 +94,11 @@ export default function OpenClawDevicesPage() {
 
   return (
     <OpenClawPageShell
-      title="OpenClaw Device 管理"
-      description="這裡會同時顯示 pending 與 paired device。每個操作都會保留審計紀錄，且按鈕只鎖定目前正在處理的那台設備。"
+      title="Devices"
+      description="Devices 是 OpenClaw Control Center 內的 Admin Tools 分區，這裡會同時顯示 pending 與 paired device，並保留每次授權操作的審計痕跡。"
       roles={DEVICE_ROLES}
+      sectionGroup="Admin Tools"
+      sectionLabel="Devices"
     >
       <PixelCard title="Instance 切換" eyebrow="Devices">
         <div className="grid gap-4 lg:grid-cols-[280px_auto_1fr]">
@@ -92,11 +106,13 @@ export default function OpenClawDevicesPage() {
             instances={instances}
             value={selectedInstanceId}
             onChange={setSelectedInstanceId}
+            disabled={!hasInstances || isPending}
           />
           <button
             type="button"
             onClick={() => selectedInstanceId && loadDevices(selectedInstanceId)}
-            className="pixel-button bg-teal px-4 py-3 text-sm font-black tracking-[0.08em] text-white"
+            disabled={!canManageDevices || isPending}
+            className="pixel-button bg-teal px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
           >
             重新整理
           </button>
@@ -139,7 +155,7 @@ export default function OpenClawDevicesPage() {
                         key={action}
                         type="button"
                         onClick={() => handleDeviceAction(action, device.id)}
-                        disabled={busy}
+                        disabled={busy || !canManageDevices}
                         className="pixel-button bg-ink px-4 py-3 text-sm font-black tracking-[0.08em] text-sand disabled:opacity-60"
                       >
                         {busy ? `${action} 中...` : action}

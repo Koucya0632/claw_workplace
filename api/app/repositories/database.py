@@ -253,6 +253,20 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS openclaw_development_configs (
+        instance_id TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        delivery_channel TEXT NOT NULL DEFAULT 'discord',
+        discord_channel_id TEXT NOT NULL DEFAULT '',
+        last_run_id TEXT,
+        last_delivery_status TEXT,
+        last_delivery_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(instance_id) REFERENCES openclaw_instances(id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS workflow_runs (
         id TEXT PRIMARY KEY,
         instance_id TEXT NOT NULL,

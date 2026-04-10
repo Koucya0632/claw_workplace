@@ -14,12 +14,12 @@ function AnalysisRedirectContent() {
     router.replace(runId ? `/search?runId=${runId}` : "/search");
   }, [router, runId]);
 
-  return <div className="pixel-panel rounded-none p-6 text-sm text-slate-600">正在導向一體化工作流頁面...</div>;
+  return <div className="status-strip rounded-[1.25rem] p-6 text-sm text-slate-600">正在導向一體化工作流頁面...</div>;
 }
 
 export default function AnalysisPage() {
   return (
-    <Suspense fallback={<div className="pixel-panel rounded-none p-6 text-sm text-slate-600">正在載入分析頁...</div>}>
+    <Suspense fallback={<div className="status-strip rounded-[1.25rem] p-6 text-sm text-slate-600">正在載入分析頁...</div>}>
       <AnalysisRedirectContent />
     </Suspense>
   );

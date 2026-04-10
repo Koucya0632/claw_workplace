@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
 
+from app.config import get_settings
 from app.repositories.openclaw_instance_repository import OpenClawInstanceRepository
 from app.repositories.openclaw_operation_log_repository import OpenClawOperationLogRepository
+from app.repositories.openclaw_development_config_repository import OpenClawDevelopmentConfigRepository
 from app.repositories.openclaw_system_inspection_config_repository import OpenClawSystemInspectionConfigRepository
 from app.repositories.openclaw_workflow_config_repository import OpenClawWorkflowConfigRepository
 from app.repositories.workflow_repository import WorkflowRepository
 from app.repositories.openclaw_daily_news_config_repository import OpenClawDailyNewsConfigRepository
-from app.routers import openclaw_daily_news, openclaw_instances, openclaw_system_inspection, openclaw_workflow_config, workflows
+from app.routers import openclaw_daily_news, openclaw_development, openclaw_instances, openclaw_system_inspection, openclaw_workflow_config, workflows
 from app.schemas.openclaw_daily_news import OpenClawDailyNewsConfigResponse
+from app.schemas.openclaw_development import OpenClawDevelopmentConfigResponse
 from app.schemas.openclaw_instance import OpenClawInstanceSnapshotSummary, OpenClawInstanceResponse
 from app.schemas.openclaw_system_inspection import OpenClawSystemInspectionConfigResponse
 from app.schemas.workflow import WorkflowNewsDedupeOutput, WorkflowNewsRankOutput, WorkflowNewsSearchOutput
@@ -28,11 +32,14 @@ from app.services.openclaw_secret_cipher import OpenClawSecretCipher
 from app.services.openclaw_errors import OpenClawServiceError
 from app.services.openclaw_service import OpenClawInstanceService
 from app.services.openclaw_release_client import OpenClawReleaseClient
+from app.services import workflow_service as workflow_service_module
 from app.services.workflow_service import (
     OpenClawDailyNewsConfigService,
+    OpenClawDevelopmentConfigService,
     OpenClawSystemInspectionConfigService,
     OpenClawWorkflowConfigService,
     SearchReportWorkflowService,
+    _build_missing_text_detail,
     _build_news_brief_prompt,
     _build_news_dedupe_prompt,
     _build_news_monitor_prompt,
@@ -43,6 +50,7 @@ from app.services.workflow_service import (
     _compact_system_log_review_output,
     _compact_system_risk_output,
     _compact_system_version_output,
+    _extract_agent_text,
     _is_agent_timeout_error,
 )
 
@@ -64,6 +72,18 @@ class MockWorkflowCliAdapter:
     def get_version(self) -> str:
         return "OpenClaw 2026.4.1 (da64a97)"
 
+    def get_update_summary(self) -> dict[str, Any]:
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "status": "available",
+            "current_version": "OpenClaw 2026.4.1 (da64a97)",
+            "latest_version": "2026.4.5",
+            "channel_label": "stable (default)",
+            "update_available": True,
+            "install_kind": "package",
+            "package_manager": "pnpm",
+        }
+
     def get_global_config(self, path: str) -> dict[str, Any]:
         return {"value": "2026.4.1"}
 
@@ -83,6 +103,9 @@ class MockWorkflowHookClient:
     def __init__(self) -> None:
         self.fail_once_stage_keys: set[str] = set()
         self.calls_by_stage: dict[str, int] = {}
+        self.system_inspection_report_override: dict[str, Any] | None = None
+        self.handoff_payload_override: dict[str, Any] | None = None
+        self.stage_payload_overrides: dict[str, dict[str, Any]] = {}
 
     def dispatch_agent(self, instance, token: str | None, payload: dict[str, Any]) -> dict[str, Any]:
         stage_key = payload["metadata"]["stage_key"]
@@ -101,6 +124,8 @@ class MockWorkflowHookClient:
                     "timeout_seconds": payload.get("timeout_seconds"),
                 },
             )
+        if stage_key in self.stage_payload_overrides:
+            return self.stage_payload_overrides[stage_key]
 
         if stage_key == "understand":
             text = json.dumps(
@@ -561,6 +586,8 @@ class MockWorkflowHookClient:
                 },
                 ensure_ascii=False,
             )
+        elif stage_key == "handoff" and self.handoff_payload_override is not None:
+            return self.handoff_payload_override
         elif stage_key == "handoff":
             text = json.dumps(
                 {
@@ -584,69 +611,67 @@ class MockWorkflowHookClient:
                 ensure_ascii=False,
             )
         elif stage_key == "report" and payload["metadata"].get("workflow_type") == "system_inspection":
-            text = json.dumps(
-                {
-                    "title": "系統巡檢與風險評估報告",
-                    "inspection_summary": ["目前系統可用，但仍有 timeout 與 Telegram Markdown 穩定性風險。"],
-                    "version_update_check": {
-                        "current_version": "OpenClaw 2026.4.1 (da64a97)",
-                        "latest_version": "2026.4.2",
-                        "latest_version_status": "available",
-                        "version_gap": "1 patch release",
-                        "release_summary": ["修復 plugin 載入穩定性問題", "改善 Telegram 投遞相容性"],
-                        "breaking_changes": [],
-                        "deprecations": ["部分舊 plugin manifest 欄位已不建議使用"],
-                        "compatibility_risks": ["升級前需確認 plugin manifest 與 workflow prompt 相容性"],
-                        "affected_areas": {
-                            "agent_config": ["確認 specialist agent mapping 未受影響"],
-                            "tool_permissions": ["檢查 project_search / web_search 權限"],
-                            "prompt_logic": ["回歸測試 system inspection 與 news brief prompts"],
-                            "workflow": ["驗證 stage timeout 與 failure handling"],
-                            "plugins_skills": ["確認 project-search plugin manifest 與 bridge"],
-                            "ui_console": ["巡檢頁與 Daily News 頁回歸"],
-                            "deployment_runtime": ["重啟 gateway 後確認 runtime config 生效"],
-                        },
-                        "upgrade_recommendation": "test_before_upgrade",
-                        "regression_test_checklist": ["workflow smoke test", "telegram delivery test"],
-                        "assumptions": ["官方 release 摘要可正常代表最新 patch 內容"],
-                        "verification_steps": ["在 staging 升級後跑 smoke test"],
+            report_payload = self.system_inspection_report_override or {
+                "title": "系統巡檢與風險評估報告",
+                "inspection_summary": ["目前系統可用，但仍有 timeout 與 Telegram Markdown 穩定性風險。"],
+                "version_update_check": {
+                    "current_version": "OpenClaw 2026.4.1 (da64a97)",
+                    "latest_version": "2026.4.2",
+                    "latest_version_status": "available",
+                    "version_gap": "1 patch release",
+                    "release_summary": ["修復 plugin 載入穩定性問題", "改善 Telegram 投遞相容性"],
+                    "breaking_changes": [],
+                    "deprecations": ["部分舊 plugin manifest 欄位已不建議使用"],
+                    "compatibility_risks": ["升級前需確認 plugin manifest 與 workflow prompt 相容性"],
+                    "affected_areas": {
+                        "agent_config": ["確認 specialist agent mapping 未受影響"],
+                        "tool_permissions": ["檢查 project_search / web_search 權限"],
+                        "prompt_logic": ["回歸測試 system inspection 與 news brief prompts"],
+                        "workflow": ["驗證 stage timeout 與 failure handling"],
+                        "plugins_skills": ["確認 project-search plugin manifest 與 bridge"],
+                        "ui_console": ["巡檢頁與 Daily News 頁回歸"],
+                        "deployment_runtime": ["重啟 gateway 後確認 runtime config 生效"],
                     },
-                    "log_review": {
-                        "summary": "近期主要問題集中在 timeout 與 Telegram Markdown 投遞。",
-                        "issues": [],
-                        "log_window_hours": 24,
-                        "inspected_log_count": 4,
-                    },
-                    "high_priority_risks": [
-                        {
-                            "issue_key": "timeout:dispatch_workflow_stage",
-                            "category": "timeout",
-                            "description": "workflow stage dispatch 偶發 timeout",
-                            "frequency": 2,
-                            "first_seen_at": "2026-04-05T09:10:00Z",
-                            "last_seen_at": "2026-04-05T09:20:00Z",
-                            "possible_root_causes": ["agent prompt 過大"],
-                            "affected_components": ["workflow_dispatch"],
-                            "impact_scope": "news brief 和 inspection 可能延遲",
-                            "severity": "high",
-                            "fix_actions": ["縮小 stage prompt", "必要時提高 timeout"],
-                            "optimization_actions": ["針對高成本 stage 使用獨立 timeout"],
-                            "priority": "p1",
-                            "assumptions": [],
-                            "verification_steps": ["重跑同類 workflow"],
-                        }
-                    ],
-                    "fix_and_optimization_actions": ["先優化高成本 stage prompt", "建立 staging 升級回歸清單"],
-                    "open_questions": ["官方 patch 是否涉及更多 plugin manifest 變更"],
-                    "recommended_execution_order": ["先修 timeout 熱點", "再於 staging 測 2026.4.2", "確認無回歸後再升級正式環境"],
-                    "telegram_summary": "巡檢結論：先修 timeout，再測試升級到 2026.4.2。",
-                    "markdown": "# 系統巡檢與風險評估報告\n\n## 1. 巡檢總結\n- 先修 timeout，再測試升級。\n",
-                    "delivery_status": "pending",
-                    "delivery_target": None,
-                    "delivery_error": None,
+                    "upgrade_recommendation": "test_before_upgrade",
+                    "regression_test_checklist": ["workflow smoke test", "telegram delivery test"],
+                    "assumptions": ["官方 release 摘要可正常代表最新 patch 內容"],
+                    "verification_steps": ["在 staging 升級後跑 smoke test"],
                 },
-                ensure_ascii=False,
-            )
+                "log_review": {
+                    "summary": "近期主要問題集中在 timeout 與 Telegram Markdown 投遞。",
+                    "issues": [],
+                    "log_window_hours": 24,
+                    "inspected_log_count": 4,
+                },
+                "high_priority_risks": [
+                    {
+                        "issue_key": "timeout:dispatch_workflow_stage",
+                        "category": "timeout",
+                        "description": "workflow stage dispatch 偶發 timeout",
+                        "frequency": 2,
+                        "first_seen_at": "2026-04-05T09:10:00Z",
+                        "last_seen_at": "2026-04-05T09:20:00Z",
+                        "possible_root_causes": ["agent prompt 過大"],
+                        "affected_components": ["workflow_dispatch"],
+                        "impact_scope": "news brief 和 inspection 可能延遲",
+                        "severity": "high",
+                        "fix_actions": ["縮小 stage prompt", "必要時提高 timeout"],
+                        "optimization_actions": ["針對高成本 stage 使用獨立 timeout"],
+                        "priority": "p1",
+                        "assumptions": [],
+                        "verification_steps": ["重跑同類 workflow"],
+                    }
+                ],
+                "fix_and_optimization_actions": ["先優化高成本 stage prompt", "建立 staging 升級回歸清單"],
+                "open_questions": ["官方 patch 是否涉及更多 plugin manifest 變更"],
+                "recommended_execution_order": ["先修 timeout 熱點", "再於 staging 測 2026.4.2", "確認無回歸後再升級正式環境"],
+                "telegram_summary": "巡檢結論：先修 timeout，再測試升級到 2026.4.2。",
+                "markdown": "# 系統巡檢與風險評估報告\n\n## 1. 巡檢總結\n- 先修 timeout，再測試升級。\n",
+                "delivery_status": "pending",
+                "delivery_target": None,
+                "delivery_error": None,
+            }
+            text = json.dumps(report_payload, ensure_ascii=False)
         else:
             text = json.dumps(
                 {
@@ -722,6 +747,7 @@ def install_workflow_services() -> None:
     workflow_repository = WorkflowRepository()
     workflow_config_repository = OpenClawWorkflowConfigRepository()
     daily_news_repository = OpenClawDailyNewsConfigRepository()
+    development_repository = OpenClawDevelopmentConfigRepository()
     system_inspection_repository = OpenClawSystemInspectionConfigRepository()
     operation_log_repository = OpenClawOperationLogRepository()
     secret_cipher = OpenClawSecretCipher("test-openclaw-secret")
@@ -748,6 +774,11 @@ def install_workflow_services() -> None:
         daily_news_repository=daily_news_repository,
         operation_log_repository=operation_log_repository,
     )
+    openclaw_development.development_service = OpenClawDevelopmentConfigService(
+        repository=repository,
+        development_repository=development_repository,
+        operation_log_repository=operation_log_repository,
+    )
     openclaw_system_inspection.system_inspection_service = OpenClawSystemInspectionConfigService(
         repository=repository,
         system_inspection_repository=system_inspection_repository,
@@ -758,11 +789,13 @@ def install_workflow_services() -> None:
         workflow_repository=workflow_repository,
         workflow_config_repository=workflow_config_repository,
         daily_news_repository=daily_news_repository,
+        development_repository=development_repository,
         system_inspection_repository=system_inspection_repository,
         operation_log_repository=operation_log_repository,
         hook_client=hook_client,
         telegram_delivery_client=telegram_delivery_client,
         discord_delivery_client=discord_delivery_client,
+        development_discord_delivery_client=discord_delivery_client,
         cli_adapter=cli_adapter,
         release_client=release_client,
         secret_cipher=secret_cipher,
@@ -782,6 +815,32 @@ def create_instance(client: TestClient) -> str:
     )
     assert response.status_code == 201
     return response.json()["data"]["id"]
+
+
+def install_runtime_openclaw_route(tmp_path: Path, monkeypatch, *, channel_id: str = "1490511097147687035") -> Path:
+    openclaw_home = tmp_path / ".openclaw"
+    openclaw_home.mkdir(parents=True, exist_ok=True)
+    (openclaw_home / "openclaw.json").write_text(
+        json.dumps(
+            {
+                "bindings": [
+                    {
+                        "type": "route",
+                        "agentId": "fullstack-engineer-agent",
+                        "match": {
+                            "channel": "discord",
+                            "peer": {"kind": "channel", "id": channel_id},
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENCLAW_HOME", str(openclaw_home))
+    get_settings.cache_clear()
+    return openclaw_home
 
 
 def test_workflow_run_happy_path(client: TestClient) -> None:
@@ -1092,6 +1151,740 @@ def test_development_execution_workflow(client: TestClient) -> None:
     list_response = client.get("/api/v1/workflows", params={"instanceId": instance_id, "workflowType": "development_execution"})
     assert list_response.status_code == 200
     assert len(list_response.json()) == 1
+
+
+def test_development_execution_accepts_structured_implementation_payload_without_text(client: TestClient) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+
+    hook_client = workflows.workflow_service.hook_client
+    assert isinstance(hook_client, MockWorkflowHookClient)
+    hook_client.stage_payload_overrides["implementation"] = {
+        "status": "ok",
+        "result": {
+            "payloads": [
+                {
+                    "content": {
+                        "summary": "已完成 sources page 的主骨架與管理操作。",
+                        "completed_items": ["新增 KPI 摘要卡", "補齊來源管理表格", "加入詳情抽屜與編輯入口"],
+                        "changed_modules": [
+                            "api/app/routers/sources.py",
+                            "web/app/settings/sources/page.tsx",
+                            "web/components/source-detail-drawer.tsx",
+                        ],
+                        "notable_decisions": ["維持單頁管理，不另拆 detail page"],
+                    }
+                }
+            ],
+            "meta": {
+                "agentMeta": {
+                    "provider": "minimax",
+                    "model": "MiniMax-M2.7",
+                }
+            },
+        },
+    }
+
+    config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "", "enabled": False},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert config_response.status_code == 200
+
+    create_response = client.post(
+        "/api/v1/workflows/development-execution",
+        json={
+            "instance_id": instance_id,
+            "task_name": "優化資料源頁面",
+            "problem_background": "資料源頁缺少可視化與高效率管理能力。",
+            "goal": "建立更完整的資料源控制台。",
+            "constraints": ["沿用現有 UI 風格"],
+            "success_criteria": ["支援搜尋篩選", "支援詳情與管理操作"],
+            "context": "需要同時補後端 summary API 與前端表格。",
+            "attachments": ["spec.md"],
+            "references": ["README.md"],
+        },
+    )
+    assert create_response.status_code == 201
+    payload = create_response.json()
+    assert payload["status"] == "completed"
+    implementation_stage = next(stage for stage in payload["stages"] if stage["stage_key"] == "implementation")
+    assert implementation_stage["status"] == "completed"
+    assert implementation_stage["output_payload"]["summary"] == "已完成 sources page 的主骨架與管理操作。"
+    assert implementation_stage["output_payload"]["completed_items"][0] == "新增 KPI 摘要卡"
+
+
+def test_development_config_can_be_saved_and_loaded(client: TestClient) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+
+    save_response = client.post(
+        "/api/v1/openclaw/development-config",
+        json={
+            "instance_id": instance_id,
+            "enabled": True,
+            "delivery_channel": "discord",
+            "discord_channel_id": "channel_development",
+        },
+    )
+    assert save_response.status_code == 200
+    saved_payload = OpenClawDevelopmentConfigResponse.model_validate(save_response.json()["data"])
+    assert saved_payload.enabled is True
+    assert saved_payload.discord_channel_id == "channel_development"
+
+    get_response = client.get("/api/v1/openclaw/development-config", params={"instanceId": instance_id})
+    assert get_response.status_code == 200
+    loaded_payload = OpenClawDevelopmentConfigResponse.model_validate(get_response.json()["data"])
+    assert loaded_payload.delivery_channel == "discord"
+    assert loaded_payload.discord_channel_id == "channel_development"
+
+
+def test_development_config_requires_discord_channel_when_enabled(client: TestClient) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+
+    response = client.post(
+        "/api/v1/openclaw/development-config",
+        json={
+            "instance_id": instance_id,
+            "enabled": True,
+            "delivery_channel": "discord",
+            "discord_channel_id": "",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["success"] is False
+    assert "discord_channel_id 必填" in response.json()["error"]["detail"]
+
+
+def test_development_config_exposes_runtime_route_fallback(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+    install_runtime_openclaw_route(tmp_path, monkeypatch)
+
+    response = client.get("/api/v1/openclaw/development-config", params={"instanceId": instance_id})
+
+    assert response.status_code == 200
+    payload = OpenClawDevelopmentConfigResponse.model_validate(response.json()["data"])
+    assert payload.config_source == "default"
+    assert payload.enabled is False
+    assert payload.effective_delivery_source == "runtime_route"
+    assert payload.effective_discord_channel_id == "1490511097147687035"
+    assert "回退使用 Discord #develop route" in (payload.effective_delivery_reason or "")
+
+
+def test_development_execution_delivers_completed_report_via_runtime_route(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+    install_runtime_openclaw_route(tmp_path, monkeypatch)
+
+    workflow_config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "", "enabled": False},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert workflow_config_response.status_code == 200
+
+    create_response = client.post(
+        "/api/v1/workflows/development-execution",
+        json={
+            "instance_id": instance_id,
+            "task_name": "優化資料源頁面",
+            "problem_background": "資料源頁缺少可視化與高效率管理能力。",
+            "goal": "建立更完整的資料源控制台。",
+            "constraints": ["沿用現有 UI 風格"],
+            "success_criteria": ["支援搜尋篩選", "支援詳情與管理操作"],
+            "context": "需要同時補後端 summary API 與前端表格。",
+            "attachments": ["spec.md"],
+            "references": ["README.md"],
+        },
+    )
+    assert create_response.status_code == 201
+    payload = create_response.json()
+    assert payload["status"] == "completed"
+    assert payload["final_development_report"]["delivery_status"] == "delivered"
+    assert payload["final_development_report"]["delivery_target"] == "1490511097147687035"
+    assert payload["final_development_report"]["delivery_source"] == "runtime_route"
+    assert "回退使用 Discord #develop route" in payload["final_development_report"]["delivery_reason"]
+
+
+def test_development_execution_skips_with_reason_when_no_runtime_route_exists(client: TestClient, monkeypatch) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+    monkeypatch.setattr(workflow_service_module, "_resolve_development_runtime_route_channel", lambda: None)
+
+    workflow_config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "", "enabled": False},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert workflow_config_response.status_code == 200
+
+    create_response = client.post(
+        "/api/v1/workflows/development-execution",
+        json={
+            "instance_id": instance_id,
+            "task_name": "優化資料源頁面",
+            "problem_background": "資料源頁缺少可視化與高效率管理能力。",
+            "goal": "建立更完整的資料源控制台。",
+            "constraints": ["沿用現有 UI 風格"],
+            "success_criteria": ["支援搜尋篩選", "支援詳情與管理操作"],
+            "context": "需要同時補後端 summary API 與前端表格。",
+            "attachments": ["spec.md"],
+            "references": ["README.md"],
+        },
+    )
+    assert create_response.status_code == 201
+    payload = create_response.json()
+    assert payload["status"] == "completed"
+    assert payload["final_development_report"]["delivery_status"] == "skipped"
+    assert payload["final_development_report"]["delivery_source"] == "none"
+    assert "runtime route 未配置" in payload["final_development_report"]["delivery_reason"]
+    assert any(event["message"] == "Development 已完成，但未找到 Discord 匯報目標，已略過外部匯報。" for event in payload["events"])
+
+
+def test_development_execution_delivers_completed_report_to_discord(client: TestClient) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+
+    workflow_config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "", "enabled": False},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert workflow_config_response.status_code == 200
+
+    development_config_response = client.post(
+        "/api/v1/openclaw/development-config",
+        json={
+            "instance_id": instance_id,
+            "enabled": True,
+            "delivery_channel": "discord",
+            "discord_channel_id": "channel_development",
+        },
+    )
+    assert development_config_response.status_code == 200
+
+    create_response = client.post(
+        "/api/v1/workflows/development-execution",
+        json={
+            "instance_id": instance_id,
+            "task_name": "優化資料源頁面",
+            "problem_background": "資料源頁缺少可視化與高效率管理能力。",
+            "goal": "建立更完整的資料源控制台。",
+            "constraints": ["沿用現有 UI 風格"],
+            "success_criteria": ["支援搜尋篩選", "支援詳情與管理操作"],
+            "context": "需要同時補後端 summary API 與前端表格。",
+            "attachments": ["spec.md"],
+            "references": ["README.md"],
+        },
+    )
+    assert create_response.status_code == 201
+    payload = create_response.json()
+    assert payload["status"] == "completed"
+    assert payload["final_development_report"]["delivery_status"] == "delivered"
+    assert payload["final_development_report"]["delivery_target"] == "channel_development"
+    assert payload["final_development_report"]["delivery_source"] == "development_config"
+    assert any(event["message"] == "Development 匯報已推送到 Discord。" for event in payload["events"])
+
+    operations_response = client.get("/api/v1/openclaw/operations", params={"instanceId": instance_id})
+    assert operations_response.status_code == 200
+    operations = operations_response.json()["data"]
+    assert any(
+        item["operation_type"] == "deliver_development_report"
+        and item["status"] == "success"
+        and item["target_id"] == "channel_development"
+        for item in operations
+    )
+
+
+def test_development_execution_keeps_completed_run_when_discord_delivery_fails(client: TestClient) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+
+    class FailingDevelopmentDiscordClient:
+        source_mode = "discord_http_development"
+
+        def send_text(self, *, channel_id: str, text: str) -> dict[str, Any]:
+            raise OpenClawServiceError(
+                "Discord 報告推送失敗。",
+                detail="discord send failed",
+                source_mode=self.source_mode,
+            )
+
+    workflows.workflow_service.development_discord_delivery_client = FailingDevelopmentDiscordClient()
+
+    workflow_config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "", "enabled": False},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert workflow_config_response.status_code == 200
+
+    development_config_response = client.post(
+        "/api/v1/openclaw/development-config",
+        json={
+            "instance_id": instance_id,
+            "enabled": True,
+            "delivery_channel": "discord",
+            "discord_channel_id": "channel_development",
+        },
+    )
+    assert development_config_response.status_code == 200
+
+    create_response = client.post(
+        "/api/v1/workflows/development-execution",
+        json={
+            "instance_id": instance_id,
+            "task_name": "優化資料源頁面",
+            "problem_background": "資料源頁缺少可視化與高效率管理能力。",
+            "goal": "建立更完整的資料源控制台。",
+            "constraints": ["沿用現有 UI 風格"],
+            "success_criteria": ["支援搜尋篩選", "支援詳情與管理操作"],
+            "context": "需要同時補後端 summary API 與前端表格。",
+            "attachments": ["spec.md"],
+            "references": ["README.md"],
+        },
+    )
+    assert create_response.status_code == 201
+    payload = create_response.json()
+    assert payload["status"] == "completed"
+    assert payload["final_development_report"]["delivery_status"] == "failed"
+    assert payload["final_development_report"]["delivery_error"] == "discord send failed"
+    assert payload["final_development_report"]["delivery_source"] == "development_config"
+    assert any(event["message"] == "Development 已完成，但 Discord 匯報推送失敗。" for event in payload["events"])
+
+
+def test_development_execution_sends_failed_summary_to_discord_via_runtime_route(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+    install_runtime_openclaw_route(tmp_path, monkeypatch)
+
+    class CapturingDevelopmentDiscordClient:
+        source_mode = "discord_http_development"
+
+        def __init__(self) -> None:
+            self.sent_messages: list[dict[str, str]] = []
+
+        def send_text(self, *, channel_id: str, text: str) -> dict[str, Any]:
+            self.sent_messages.append({"channel_id": channel_id, "text": text})
+            return {"message_ids": ["9100"], "channel_id": channel_id, "message_count": 1}
+
+    discord_client = CapturingDevelopmentDiscordClient()
+    workflows.workflow_service.development_discord_delivery_client = discord_client
+
+    hook_client = workflows.workflow_service.hook_client
+    assert isinstance(hook_client, MockWorkflowHookClient)
+    hook_client.stage_payload_overrides["implementation"] = {
+        "status": "ok",
+        "result": {"payloads": [], "meta": {"agentMeta": {"provider": "minimax", "model": "MiniMax-M2.7"}}},
+    }
+
+    workflow_config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "", "enabled": False},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert workflow_config_response.status_code == 200
+
+    create_response = client.post(
+        "/api/v1/workflows/development-execution",
+        json={
+            "instance_id": instance_id,
+            "task_name": "優化資料源頁面",
+            "problem_background": "資料源頁缺少可視化與高效率管理能力。",
+            "goal": "建立更完整的資料源控制台。",
+            "constraints": ["沿用現有 UI 風格"],
+            "success_criteria": ["支援搜尋篩選", "支援詳情與管理操作"],
+            "context": "需要同時補後端 summary API 與前端表格。",
+            "attachments": ["spec.md"],
+            "references": ["README.md"],
+        },
+    )
+    assert create_response.status_code == 201
+    payload = create_response.json()
+    assert payload["status"] == "failed"
+    assert payload["error_message"] is not None
+    assert any(event["message"] == "Development 失敗摘要已推送到 Discord。" for event in payload["events"])
+    assert discord_client.sent_messages
+    assert discord_client.sent_messages[0]["channel_id"] == "1490511097147687035"
+    assert "Development Workflow Failed" in discord_client.sent_messages[0]["text"]
+    assert "Failed Stage: implementation" in discord_client.sent_messages[0]["text"]
+
+def test_development_execution_handoff_accepts_result_output_text(client: TestClient) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+
+    hook_client = workflows.workflow_service.hook_client
+    assert isinstance(hook_client, MockWorkflowHookClient)
+    hook_client.handoff_payload_override = {
+        "status": "ok",
+        "summary": "completed",
+        "result": {
+            "payloads": [],
+            "output_text": json.dumps(
+                {
+                    "task_name": "優化資料源頁面",
+                    "problem_definition": "資料源頁面缺少整體可視化與高效率管理能力，需要升級成完整後台操作台。",
+                    "requirements_analysis": ["需要 KPI 摘要", "需要搜尋篩選排序"],
+                    "solution_design": ["採 Dashboard + Table + Drawer 架構"],
+                    "technology_selection": [
+                        {"category": "frontend", "choice": "Next.js App Router + 既有 Pixel UI 元件", "reason": "能保留風格並快速組裝管理頁"}
+                    ],
+                    "task_breakdown_schedule": [
+                        {"title": "補 sources 聚合 API", "priority": "p0", "estimate": "0.5d", "description": "支援 summary、detail、activity"}
+                    ],
+                    "development_results": ["資料源頁改為 dashboard 型式"],
+                    "test_results": ["pytest passed", "vitest passed"],
+                    "risks_and_todos": ["後續可加入趨勢圖與批次操作"],
+                    "final_summary": "handoff 已透過 result.output_text 回傳完整結構化報告。",
+                },
+                ensure_ascii=False,
+            ),
+        },
+    }
+
+    config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "", "enabled": False},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert config_response.status_code == 200
+
+    create_response = client.post(
+        "/api/v1/workflows/development-execution",
+        json={
+            "instance_id": instance_id,
+            "task_name": "優化資料源頁面",
+            "problem_background": "資料源頁缺少可視化與高效率管理能力。",
+            "goal": "建立更完整的資料源控制台。",
+            "constraints": ["沿用現有 UI 風格"],
+            "success_criteria": ["支援搜尋篩選", "支援詳情與管理操作"],
+            "context": "需要同時補後端 summary API 與前端表格。",
+            "attachments": ["spec.md"],
+            "references": ["README.md"],
+        },
+    )
+    assert create_response.status_code == 201
+    payload = create_response.json()
+    assert payload["status"] == "completed"
+    assert payload["final_development_report"]["final_summary"] == "handoff 已透過 result.output_text 回傳完整結構化報告。"
+
+
+def test_development_execution_handoff_falls_back_when_agent_text_missing(client: TestClient) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+
+    hook_client = workflows.workflow_service.hook_client
+    assert isinstance(hook_client, MockWorkflowHookClient)
+    hook_client.handoff_payload_override = {
+        "status": "ok",
+        "summary": "completed",
+        "result": {
+            "payloads": [],
+            "meta": {
+                "agentMeta": {
+                    "sessionId": "handoff-session",
+                    "provider": "minimax",
+                    "model": "MiniMax-M2.7",
+                }
+            },
+        },
+    }
+
+    config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "", "enabled": False},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert config_response.status_code == 200
+
+    create_response = client.post(
+        "/api/v1/workflows/development-execution",
+        json={
+            "instance_id": instance_id,
+            "task_name": "優化資料源頁面",
+            "problem_background": "資料源頁缺少可視化與高效率管理能力。",
+            "goal": "建立更完整的資料源控制台。",
+            "constraints": ["沿用現有 UI 風格"],
+            "success_criteria": ["支援搜尋篩選", "支援詳情與管理操作"],
+            "context": "需要同時補後端 summary API 與前端表格。",
+            "attachments": ["spec.md"],
+            "references": ["README.md"],
+        },
+    )
+    assert create_response.status_code == 201
+    payload = create_response.json()
+    assert payload["status"] == "completed"
+    assert payload["final_development_report"]["task_name"] == "優化資料源頁面"
+    assert "deterministic fallback" in payload["final_development_report"]["final_summary"]
+
+
+def test_extract_agent_text_supports_common_string_fields() -> None:
+    assert _extract_agent_text({"result": {"text": "{\"ok\":true}"}}) == "{\"ok\":true}"
+    assert _extract_agent_text({"result": {"output_text": "{\"ok\":true}"}}) == "{\"ok\":true}"
+    assert _extract_agent_text({"result": {"content": "{\"ok\":true}"}}) == "{\"ok\":true}"
+    assert _extract_agent_text({"output_text": "{\"ok\":true}"}) == "{\"ok\":true}"
+    assert _extract_agent_text({"content": "{\"ok\":true}"}) == "{\"ok\":true}"
+    assert _extract_agent_text({"message": {"text": "{\"ok\":true}"}}) == "{\"ok\":true}"
+
+
+def test_missing_text_detail_includes_status_meta_and_detected_fields() -> None:
+    detail = _build_missing_text_detail(
+        {
+            "status": "ok",
+            "summary": "completed",
+            "result": {
+                "output_text": "{\"foo\":1}",
+                "meta": {
+                    "agentMeta": {
+                        "provider": "minimax",
+                        "model": "MiniMax-M1",
+                    }
+                },
+            },
+        }
+    )
+
+    assert "status=ok" in detail
+    assert "summary=completed" in detail
+    assert "provider=minimax" in detail
+    assert "model=MiniMax-M1" in detail
+    assert "text_fields=result.output_text" in detail
+
+
+def test_missing_text_detail_prefers_structured_summary_and_highlights() -> None:
+    detail = _build_missing_text_detail(
+        {
+            "status": "ok",
+            "result": {
+                "payloads": [
+                    {
+                        "content": {
+                            "summary": "已完成 sources page 的主骨架與管理操作。",
+                            "completed_items": ["新增 KPI 摘要卡", "補齊來源管理表格"],
+                            "changed_modules": ["web/app/settings/sources/page.tsx", "api/app/routers/sources.py"],
+                            "notable_decisions": ["維持單頁管理，不另拆 detail page"],
+                        }
+                    }
+                ],
+                "meta": {
+                    "agentMeta": {
+                        "provider": "minimax",
+                        "model": "MiniMax-M2.7",
+                    }
+                },
+            },
+        }
+    )
+
+    assert "summary=已完成 sources page 的主骨架與管理操作。" in detail
+    assert "completed=新增 KPI 摘要卡; 補齊來源管理表格" in detail
+    assert "modules=web/app/settings/sources/page.tsx; api/app/routers/sources.py" in detail
+    assert "provider=minimax" in detail
+    assert "model=MiniMax-M2.7" in detail
 
 
 def test_daily_news_config_and_news_brief_workflow(client: TestClient) -> None:
@@ -1487,6 +2280,11 @@ def test_system_inspection_config_and_workflow(client: TestClient) -> None:
     assert [stage["stage_key"] for stage in payload["stages"]] == ["snapshot", "version_check", "log_review", "risk_assessment", "report"]
     assert payload["final_system_inspection"]["title"] == "系統巡檢與風險評估報告"
     assert payload["final_system_inspection"]["version_update_check"]["upgrade_recommendation"] == "test_before_upgrade"
+    assert payload["final_system_inspection"]["version_update_check"]["current_version"] == "OpenClaw 2026.4.1 (da64a97)"
+    assert payload["final_system_inspection"]["version_update_check"]["latest_version"] == "2026.4.5"
+    assert payload["final_system_inspection"]["version_update_check"]["version_source"] == "openclaw_cli_update"
+    assert payload["final_system_inspection"]["repair_workflow_created"] is True
+    assert payload["final_system_inspection"]["repair_workflow_run_id"]
 
     get_config_response = client.get("/api/v1/openclaw/system-inspection-config", params={"instanceId": instance_id})
     assert get_config_response.status_code == 200
@@ -1495,6 +2293,450 @@ def test_system_inspection_config_and_workflow(client: TestClient) -> None:
     list_response = client.get("/api/v1/workflows", params={"instanceId": instance_id, "workflowType": "system_inspection"})
     assert list_response.status_code == 200
     assert len(list_response.json()) == 1
+
+    development_list_response = client.get(
+        "/api/v1/workflows",
+        params={"instanceId": instance_id, "workflowType": "development_execution"},
+    )
+    assert development_list_response.status_code == 200
+    development_runs = development_list_response.json()
+    assert len(development_runs) == 1
+    development_run = development_runs[0]
+    assert development_run["input_payload"]["trigger_source"] == "system_inspection_handoff"
+    assert development_run["input_payload"]["continued_from_run_id"] == payload["id"]
+    assert development_run["input_payload"]["origin_workflow_type"] == "system_inspection"
+
+
+def test_system_inspection_skips_repair_workflow_when_no_actionable_items(client: TestClient) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+
+    hook_client = workflows.workflow_service.hook_client
+    assert isinstance(hook_client, MockWorkflowHookClient)
+    hook_client.system_inspection_report_override = {
+        "title": "系統巡檢與風險評估報告",
+        "inspection_summary": ["目前系統穩定，沒有需要立即修復的項目。"],
+        "version_update_check": {
+            "current_version": "OpenClaw 2026.4.1 (da64a97)",
+            "latest_version": "2026.4.5",
+            "latest_version_status": "available",
+            "version_gap": "matched",
+            "release_summary": ["版本已與最新 stable 對齊。"],
+            "breaking_changes": [],
+            "deprecations": [],
+            "compatibility_risks": [],
+            "affected_areas": {},
+            "upgrade_recommendation": "do_not_upgrade_yet",
+            "regression_test_checklist": [],
+            "assumptions": [],
+            "verification_steps": [],
+        },
+        "log_review": {
+            "summary": "日誌中未發現需要立即處理的高風險訊號。",
+            "issues": [],
+            "log_window_hours": 24,
+            "inspected_log_count": 2,
+        },
+        "high_priority_risks": [],
+        "fix_and_optimization_actions": [],
+        "open_questions": [],
+        "recommended_execution_order": [],
+        "telegram_summary": "本次巡檢未發現需要立即交辦的修復項。",
+        "markdown": "# 系統巡檢與風險評估報告\n\n- 本次無可執行修復項。\n",
+        "delivery_status": "pending",
+        "delivery_target": None,
+        "delivery_error": None,
+    }
+
+    workflow_config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "main", "enabled": True},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert workflow_config_response.status_code == 200
+
+    config_response = client.post(
+        "/api/v1/openclaw/system-inspection-config",
+        json={
+            "instance_id": instance_id,
+            "enabled": True,
+            "schedule_timezone": "Asia/Tokyo",
+            "schedule_time": "09:30",
+            "delivery_channel": "telegram",
+            "telegram_target": "8351185582",
+            "discord_channel_id": "",
+            "version_check_enabled": True,
+            "log_review_enabled": True,
+            "log_review_window_hours": 24,
+            "log_review_limit": 500,
+            "official_release_url": "https://docs.openclaw.ai/cli/agents",
+        },
+    )
+    assert config_response.status_code == 200
+
+    create_response = client.post("/api/v1/workflows/system-inspection", json={"instance_id": instance_id})
+    assert create_response.status_code == 201
+    payload = create_response.json()
+    assert payload["final_system_inspection"]["repair_workflow_created"] is False
+    assert payload["final_system_inspection"]["repair_workflow_run_id"] is None
+    assert payload["final_system_inspection"]["repair_workflow_reason"] == "本次巡檢無可執行修復項，因此未建立工程流程。"
+
+    development_list_response = client.get(
+        "/api/v1/workflows",
+        params={"instanceId": instance_id, "workflowType": "development_execution"},
+    )
+    assert development_list_response.status_code == 200
+    assert development_list_response.json() == []
+
+
+def test_system_inspection_still_creates_repair_workflow_when_delivery_fails(client: TestClient) -> None:
+    class FailingTelegramDeliveryClient:
+        source_mode = "telegram_http"
+
+        def send_markdown(self, *, chat_id: str, text: str) -> dict[str, Any]:
+            raise OpenClawServiceError(
+                "Telegram delivery failed.",
+                detail="telegram send failed",
+                source_mode=self.source_mode,
+            )
+
+    install_workflow_services()
+    instance_id = create_instance(client)
+    workflows.workflow_service.system_inspection_telegram_delivery_client = FailingTelegramDeliveryClient()
+
+    workflow_config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "main", "enabled": True},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert workflow_config_response.status_code == 200
+
+    config_response = client.post(
+        "/api/v1/openclaw/system-inspection-config",
+        json={
+            "instance_id": instance_id,
+            "enabled": True,
+            "schedule_timezone": "Asia/Tokyo",
+            "schedule_time": "09:30",
+            "delivery_channel": "telegram",
+            "telegram_target": "8351185582",
+            "discord_channel_id": "",
+            "version_check_enabled": True,
+            "log_review_enabled": True,
+            "log_review_window_hours": 24,
+            "log_review_limit": 500,
+            "official_release_url": "https://docs.openclaw.ai/cli/agents",
+        },
+    )
+    assert config_response.status_code == 200
+
+    create_response = client.post("/api/v1/workflows/system-inspection", json={"instance_id": instance_id})
+    assert create_response.status_code == 201
+    payload = create_response.json()
+    assert payload["final_system_inspection"]["delivery_status"] == "failed"
+    assert payload["final_system_inspection"]["delivery_error"] == "telegram send failed"
+    assert payload["final_system_inspection"]["repair_workflow_created"] is True
+    assert payload["final_system_inspection"]["repair_workflow_run_id"]
+
+
+def test_system_inspection_version_check_falls_back_to_cli_summary_when_agent_text_missing(client: TestClient) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+
+    hook_client = workflows.workflow_service.hook_client
+    assert isinstance(hook_client, MockWorkflowHookClient)
+    hook_client.stage_payload_overrides["version_check"] = {
+        "status": "ok",
+        "summary": "completed",
+        "result": {
+            "payloads": [],
+            "meta": {
+                "agentMeta": {
+                    "sessionId": "version-check-session",
+                    "provider": "minimax",
+                    "model": "MiniMax-M2.7",
+                }
+            },
+        },
+    }
+
+    workflow_config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "main", "enabled": True},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert workflow_config_response.status_code == 200
+
+    config_response = client.post(
+        "/api/v1/openclaw/system-inspection-config",
+        json={
+            "instance_id": instance_id,
+            "enabled": True,
+            "schedule_timezone": "Asia/Tokyo",
+            "schedule_time": "09:30",
+            "delivery_channel": "telegram",
+            "telegram_target": "8351185582",
+            "discord_channel_id": "",
+            "version_check_enabled": True,
+            "log_review_enabled": True,
+            "log_review_window_hours": 24,
+            "log_review_limit": 500,
+            "official_release_url": "https://docs.openclaw.ai/cli/agents",
+        },
+    )
+    assert config_response.status_code == 200
+
+    create_response = client.post("/api/v1/workflows/system-inspection", json={"instance_id": instance_id})
+    assert create_response.status_code == 201
+    payload = create_response.json()
+
+    assert payload["status"] == "completed"
+    assert payload["final_system_inspection"]["version_update_check"]["current_version"] == "OpenClaw 2026.4.1 (da64a97)"
+    assert payload["final_system_inspection"]["version_update_check"]["latest_version"] == "2026.4.5"
+    assert payload["final_system_inspection"]["version_update_check"]["version_source"] == "openclaw_cli_update"
+    version_stage = next(stage for stage in payload["stages"] if stage["stage_key"] == "version_check")
+    assert version_stage["status"] == "completed"
+
+
+def test_system_inspection_report_falls_back_when_agent_text_missing(client: TestClient) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+
+    hook_client = workflows.workflow_service.hook_client
+    assert isinstance(hook_client, MockWorkflowHookClient)
+    hook_client.stage_payload_overrides["report"] = {
+        "status": "ok",
+        "summary": "completed",
+        "result": {
+            "payloads": [],
+            "meta": {
+                "agentMeta": {
+                    "sessionId": "report-session",
+                    "provider": "minimax",
+                    "model": "MiniMax-M2.7",
+                }
+            },
+        },
+    }
+
+    workflow_config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "main", "enabled": True},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert workflow_config_response.status_code == 200
+
+    config_response = client.post(
+        "/api/v1/openclaw/system-inspection-config",
+        json={
+            "instance_id": instance_id,
+            "enabled": True,
+            "schedule_timezone": "Asia/Tokyo",
+            "schedule_time": "09:30",
+            "delivery_channel": "telegram",
+            "telegram_target": "8351185582",
+            "discord_channel_id": "",
+            "version_check_enabled": True,
+            "log_review_enabled": True,
+            "log_review_window_hours": 24,
+            "log_review_limit": 500,
+            "official_release_url": "https://docs.openclaw.ai/cli/agents",
+        },
+    )
+    assert config_response.status_code == 200
+
+    create_response = client.post("/api/v1/workflows/system-inspection", json={"instance_id": instance_id})
+    assert create_response.status_code == 201
+    payload = create_response.json()
+
+    assert payload["status"] == "completed"
+    assert payload["final_system_inspection"]["title"] == "系統巡檢與風險評估報告"
+    assert payload["final_system_inspection"]["markdown"]
+    assert payload["final_system_inspection"]["repair_workflow_created"] is True
+    report_stage = next(stage for stage in payload["stages"] if stage["stage_key"] == "report")
+    assert report_stage["status"] == "completed"
+
+
+def test_system_inspection_risk_assessment_falls_back_when_agent_text_missing(client: TestClient) -> None:
+    install_workflow_services()
+    instance_id = create_instance(client)
+
+    hook_client = workflows.workflow_service.hook_client
+    assert isinstance(hook_client, MockWorkflowHookClient)
+    hook_client.stage_payload_overrides["risk_assessment"] = {
+        "status": "ok",
+        "summary": "completed",
+        "result": {
+            "payloads": [],
+            "meta": {
+                "agentMeta": {
+                    "sessionId": "risk-session",
+                    "provider": "minimax",
+                    "model": "MiniMax-M2.7",
+                }
+            },
+        },
+    }
+
+    workflow_config_response = client.post(
+        "/api/v1/openclaw/workflow-config",
+        json={
+            "instance_id": instance_id,
+            "controller_agent_id": "main",
+            "search_agent_id": "search-agent",
+            "analysis_agent_id": "analysis-agent",
+            "report_agent_id": "report-agent",
+            "specialist_agents": {
+                "search_web": {"agent_id": "main", "enabled": True},
+                "organizer": {"agent_id": "organizer-agent", "enabled": True},
+                "writer": {"agent_id": "report-agent", "enabled": True},
+                "test_design": {"agent_id": "", "enabled": False},
+                "ui_review": {"agent_id": "", "enabled": False},
+                "monitor": {"agent_id": "", "enabled": False},
+                "fullstack_engineer": {"agent_id": "fullstack-engineer-agent", "enabled": True},
+                "daily_news_brief": {"agent_id": "main", "enabled": True},
+                "system_inspection": {"agent_id": "system-inspection-agent", "enabled": True},
+            },
+            "routing_rules": [],
+            "handoff_policy": {
+                "manual_review_required_on_conflict": True,
+                "manual_review_required_on_high_risk": True,
+                "max_search_retry_count": 1,
+                "max_report_retry_count": 2,
+                "timeout_escalation_seconds": 180,
+                "fallback_mode": "controller",
+            },
+        },
+    )
+    assert workflow_config_response.status_code == 200
+
+    config_response = client.post(
+        "/api/v1/openclaw/system-inspection-config",
+        json={
+            "instance_id": instance_id,
+            "enabled": True,
+            "schedule_timezone": "Asia/Tokyo",
+            "schedule_time": "09:30",
+            "delivery_channel": "telegram",
+            "telegram_target": "8351185582",
+            "discord_channel_id": "",
+            "version_check_enabled": True,
+            "log_review_enabled": True,
+            "log_review_window_hours": 24,
+            "log_review_limit": 500,
+            "official_release_url": "https://docs.openclaw.ai/cli/agents",
+        },
+    )
+    assert config_response.status_code == 200
+
+    create_response = client.post("/api/v1/workflows/system-inspection", json={"instance_id": instance_id})
+    assert create_response.status_code == 201
+    payload = create_response.json()
+
+    assert payload["status"] == "completed"
+    risk_stage = next(stage for stage in payload["stages"] if stage["stage_key"] == "risk_assessment")
+    assert risk_stage["status"] == "completed"
+    assert payload["final_system_inspection"]["high_priority_risks"] is not None
 
 
 def test_system_report_prompt_is_compact() -> None:

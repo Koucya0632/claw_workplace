@@ -38,6 +38,7 @@ export default function OpenClawInstancesPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [isPending, startTransition] = useTransition();
+  const canCreateInstance = Boolean(name.trim() && gatewayUrl.trim()) && !isPending;
 
   async function loadInstances() {
     const payload = await fetchOpenClawInstances();
@@ -63,6 +64,7 @@ export default function OpenClawInstancesPage() {
       setIsLoading(true);
       try {
         await loadInstances();
+        setMessage((current) => current || "若要保存 token，請先設定 OPENCLAW_SECRET_KEY。");
         setError("");
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : "無法載入 OpenClaw Instance");
@@ -148,9 +150,11 @@ export default function OpenClawInstancesPage() {
 
   return (
     <OpenClawPageShell
-      title="OpenClaw Instance 管理"
-      description="這一頁負責新增、編輯與巡檢 OpenClaw Instance。Gateway token 只會送往後端保存，不會在畫面中重新顯示。"
+      title="Instances"
+      description="Instances 是 OpenClaw Control Center 內的 Admin Tools 分區，負責新增、編輯與巡檢 Gateway 入口。token 只會送往後端保存，不會在畫面中重新顯示。"
       roles={INSTANCE_ROLES}
+      sectionGroup="Admin Tools"
+      sectionLabel="Instances"
     >
       <PixelCard title="新增 Instance" eyebrow="Create">
         <div className="grid gap-4 lg:grid-cols-[1fr_1.2fr_1fr_auto]">
@@ -176,7 +180,7 @@ export default function OpenClawInstancesPage() {
           <button
             type="button"
             onClick={handleCreateInstance}
-            disabled={isPending}
+            disabled={!canCreateInstance}
             className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
           >
             建立 Instance

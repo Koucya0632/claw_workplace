@@ -256,10 +256,10 @@ export default function SourceSettingsPage() {
     <div className="space-y-5">
       <SourceMetricsGrid metrics={metrics} />
 
-      <PixelCard title="資料源管理台" eyebrow="Sources Console">
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto_auto_auto_auto]">
+      <PixelCard title="篩選與批次操作" eyebrow="Sources Console">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_repeat(2,minmax(0,0.6fr))]">
           <label className="space-y-2">
-            <span className="text-[10px] uppercase tracking-[0.24em] text-slate-500">搜尋</span>
+            <span className="field-label">搜尋</span>
             <input
               value={searchInput}
               onChange={(event) => setSearchInput(event.target.value)}
@@ -268,17 +268,17 @@ export default function SourceSettingsPage() {
                   setQuery(searchInput.trim());
                 }
               }}
-              placeholder="搜尋名稱、類型、路徑、URL"
-              className="w-full border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
+              placeholder="搜尋名稱、路徑、URL"
+              className="input-shell w-full rounded-[1rem] px-4 py-3 text-sm"
             />
           </label>
 
           <label className="space-y-2">
-            <span className="text-[10px] uppercase tracking-[0.24em] text-slate-500">狀態</span>
+            <span className="field-label">狀態</span>
             <select
               value={statusFilter}
               onChange={(event) => setStatusFilter(event.target.value)}
-              className="w-full border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
+              className="select-shell w-full rounded-[1rem] px-4 py-3 text-sm"
             >
               {STATUS_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -289,11 +289,11 @@ export default function SourceSettingsPage() {
           </label>
 
           <label className="space-y-2">
-            <span className="text-[10px] uppercase tracking-[0.24em] text-slate-500">類型</span>
+            <span className="field-label">類型</span>
             <select
               value={typeFilter}
               onChange={(event) => setTypeFilter(event.target.value as "" | SourceType)}
-              className="w-full border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
+              className="select-shell w-full rounded-[1rem] px-4 py-3 text-sm"
             >
               {SOURCE_TYPE_OPTIONS.map((option) => (
                 <option key={option.value || "all"} value={option.value}>
@@ -302,40 +302,45 @@ export default function SourceSettingsPage() {
               ))}
             </select>
           </label>
-
-          <label className="space-y-2">
-            <span className="text-[10px] uppercase tracking-[0.24em] text-slate-500">排序</span>
-            <select
-              value={sortKey}
-              onChange={(event) => setSortKey(event.target.value as (typeof SORT_OPTIONS)[number]["value"])}
-              className="w-full border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
-            >
-              {SORT_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="space-y-2">
-            <span className="text-[10px] uppercase tracking-[0.24em] text-slate-500">排序方向</span>
-            <select
-              value={sortOrder}
-              onChange={(event) => setSortOrder(event.target.value as "asc" | "desc")}
-              className="w-full border-4 border-ink bg-white px-4 py-3 text-sm outline-none"
-            >
-              <option value="desc">由新到舊</option>
-              <option value="asc">由舊到新</option>
-            </select>
-          </label>
         </div>
+
+        <details className="mt-4 rounded-[1rem] border border-slate-200 bg-white/70 p-4">
+          <summary className="cursor-pointer text-sm font-black tracking-[0.05em] text-ink">更多篩選</summary>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <label className="space-y-2">
+              <span className="field-label">排序</span>
+              <select
+                value={sortKey}
+                onChange={(event) => setSortKey(event.target.value as (typeof SORT_OPTIONS)[number]["value"])}
+                className="select-shell w-full rounded-[1rem] px-4 py-3 text-sm"
+              >
+                {SORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="space-y-2">
+              <span className="field-label">排序方向</span>
+              <select
+                value={sortOrder}
+                onChange={(event) => setSortOrder(event.target.value as "asc" | "desc")}
+                className="select-shell w-full rounded-[1rem] px-4 py-3 text-sm"
+              >
+                <option value="desc">由新到舊</option>
+                <option value="asc">由舊到新</option>
+              </select>
+            </label>
+          </div>
+        </details>
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             type="button"
             onClick={() => setQuery(searchInput.trim())}
-            className="pixel-button bg-slate-100 px-4 py-3 text-sm font-black"
+            className="pixel-button rounded-[1rem] bg-white px-4 py-3 text-sm font-black"
           >
             搜尋
           </button>
@@ -346,7 +351,7 @@ export default function SourceSettingsPage() {
               setSortKey("last_sync");
               setSortOrder("desc");
             }}
-            className="pixel-button bg-gold px-4 py-3 text-sm font-black"
+            className="pixel-button rounded-[1rem] bg-gold px-4 py-3 text-sm font-black"
           >
             只看異常
           </button>
@@ -354,26 +359,27 @@ export default function SourceSettingsPage() {
             type="button"
             onClick={handleBatchRefresh}
             disabled={busyAction === "batch" || visibleSources.length === 0}
-            className="pixel-button bg-teal px-4 py-3 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-60"
+            className="pixel-button rounded-[1rem] bg-teal px-4 py-3 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {busyAction === "batch" ? "批次同步中..." : "批次重新整理"}
+            {busyAction === "batch" ? "批次同步中..." : "批次同步"}
           </button>
           <button
             type="button"
             onClick={openCreateDialog}
-            className="pixel-button bg-coral px-4 py-3 text-sm font-black text-white"
+            className="pixel-button rounded-[1rem] bg-coral px-4 py-3 text-sm font-black text-white"
           >
             新增資料源
           </button>
         </div>
 
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
-          <div className="border-4 border-ink bg-white p-4 text-sm text-slate-700">
-            <p>頁面會直接顯示文件數、最近同步狀態與錯誤摘要，方便優先處理異常來源。</p>
-          </div>
-          <div className="border-4 border-ink bg-sand p-4 text-sm text-slate-700">
-            {error ? <span className="text-coral">{error}</span> : message || (isPending ? "正在同步資料源狀態..." : "資料源管理台已就緒。")}
-          </div>
+        <div className="status-strip mt-4 rounded-[1.25rem] px-4 py-3 text-sm text-slate-700">
+          {error ? (
+            <span className="text-coral">{error}</span>
+          ) : message || isPending ? (
+            message || "正在同步資料源狀態..."
+          ) : (
+            "待命。"
+          )}
         </div>
       </PixelCard>
 

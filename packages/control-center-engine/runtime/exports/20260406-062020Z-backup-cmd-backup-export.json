@@ -1,0 +1,121 @@
+{
+  "ok": true,
+  "schemaVersion": "phase-9",
+  "source": "command",
+  "requestId": "cmd-backup-export",
+  "exportedAt": "2026-04-06T06:20:20.343Z",
+  "snapshotGeneratedAt": "2026-04-06T06:20:20.343Z",
+  "sessions": [
+    {
+      "sessionKey": "agent:main:main",
+      "agentId": "main",
+      "lastMessageAt": "2026-04-06T06:16:17.612Z",
+      "state": "idle"
+    },
+    {
+      "sessionKey": "agent:main:discord:channel:1490189668254486650",
+      "agentId": "main",
+      "lastMessageAt": "2026-04-06T03:08:05.998Z",
+      "state": "idle"
+    },
+    {
+      "sessionKey": "agent:system-inspection-agent:main",
+      "agentId": "system-inspection-agent",
+      "lastMessageAt": "2026-04-06T03:02:28.570Z",
+      "state": "idle"
+    },
+    {
+      "sessionKey": "agent:fullstack-engineer-agent:discord:channel:1490511097147687035",
+      "agentId": "fullstack-engineer-agent",
+      "lastMessageAt": "2026-04-06T02:56:32.836Z",
+      "state": "idle"
+    },
+    {
+      "sessionKey": "agent:main:discord:channel:1490511097147687035",
+      "agentId": "main",
+      "lastMessageAt": "2026-04-06T01:31:51.687Z",
+      "state": "idle"
+    },
+    {
+      "sessionKey": "agent:daily-news-brief-agent:main",
+      "agentId": "daily-news-brief-agent",
+      "lastMessageAt": "2026-04-06T00:05:02.039Z",
+      "state": "idle"
+    },
+    {
+      "sessionKey": "agent:support-agent:main",
+      "agentId": "support-agent",
+      "lastMessageAt": "2026-04-05T16:07:39.631Z",
+      "state": "idle"
+    },
+    {
+      "sessionKey": "agent:support-agent:discord:channel:1490333478942675076",
+      "agentId": "support-agent",
+      "lastMessageAt": "2026-04-05T13:43:56.743Z",
+      "state": "idle"
+    },
+    {
+      "sessionKey": "agent:main:discord:direct:686246830085898249",
+      "agentId": "main",
+      "lastMessageAt": "2026-04-05T04:04:35.696Z",
+      "state": "idle"
+    },
+    {
+      "sessionKey": "agent:main:telegram:direct:8351185582",
+      "agentId": "main",
+      "lastMessageAt": "2026-04-05T00:37:04.880Z",
+      "state": "running"
+    }
+  ],
+  "projects": {
+    "projects": [],
+    "updatedAt": "1970-01-01T00:00:00.000Z"
+  },
+  "tasks": {
+    "tasks": [],
+    "agentBudgets": [],
+    "updatedAt": "1970-01-01T00:00:00.000Z"
+  },
+  "budgets": {
+    "policy": {
+      "defaults": {
+        "warnRatio": 0.8
+      },
+      "agent": {},
+      "project": {},
+      "task": {}
+    },
+    "issues": [],
+    "summary": {
+      "total": 0,
+      "ok": 0,
+      "warn": 0,
+      "over": 0,
+      "evaluations": []
+    }
+  },
+  "exceptions": {
+    "generatedAt": "2026-04-06T06:20:20.343Z",
+    "blocked": [],
+    "errors": [],
+    "pendingApprovals": [],
+    "overBudget": [],
+    "tasksDue": [],
+    "counts": {
+      "blocked": 0,
+      "errors": 0,
+      "pendingApprovals": 0,
+      "overBudget": 0,
+      "tasksDue": 0
+    }
+  },
+  "exceptionsFeed": {
+    "generatedAt": "2026-04-06T06:20:20.344Z",
+    "items": [],
+    "counts": {
+      "info": 0,
+      "warn": 0,
+      "actionRequired": 0
+    }
+  }
+}

@@ -436,6 +436,22 @@ export interface OpenClawSystemInspectionConfigResponse {
   updated_at: string;
 }
 
+export interface OpenClawDevelopmentConfigResponse {
+  instance_id: string;
+  enabled: boolean;
+  delivery_channel: "discord";
+  discord_channel_id: string;
+  last_run_id?: string | null;
+  last_delivery_status?: string | null;
+  last_delivery_error?: string | null;
+  config_source: "stored" | "default";
+  effective_delivery_source: "development_config" | "runtime_route" | "none";
+  effective_discord_channel_id?: string | null;
+  effective_delivery_reason?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export type WorkflowType = "search_report" | "web_search" | "news_brief" | "system_inspection" | "development_execution";
 export type WebSearchOutputFormat = "summary" | "bullets" | "table" | "comparison";
 
@@ -572,6 +588,9 @@ export interface WorkflowSystemInspectionVersionOutput {
   current_version: string;
   latest_version?: string | null;
   latest_version_status: string;
+  update_available?: boolean | null;
+  channel_label?: string | null;
+  version_source?: "openclaw_cli_update" | "official_release_fallback" | "unknown";
   version_gap: string;
   release_summary: string[];
   breaking_changes: string[];
@@ -614,6 +633,9 @@ export interface WorkflowSystemInspectionReportPayload {
   delivery_status: string;
   delivery_target?: string | null;
   delivery_error?: string | null;
+  repair_workflow_created?: boolean;
+  repair_workflow_run_id?: string | null;
+  repair_workflow_reason?: string | null;
 }
 
 export interface WorkflowDevelopmentProblemDefinitionOutput {
@@ -698,6 +720,11 @@ export interface WorkflowDevelopmentExecutionReportPayload {
   test_results: string[];
   risks_and_todos: string[];
   final_summary: string;
+  delivery_status: string;
+  delivery_target?: string | null;
+  delivery_error?: string | null;
+  delivery_source: "development_config" | "runtime_route" | "none";
+  delivery_reason?: string | null;
 }
 
 export interface WorkflowStageRun {
@@ -782,6 +809,9 @@ export interface WorkflowDevelopmentExecutionCreateRequest {
   task_name: string;
   problem_background: string;
   goal: string;
+  trigger_source?: "manual" | "system_inspection_handoff";
+  continued_from_run_id?: string | null;
+  origin_workflow_type?: "system_inspection" | null;
   constraints: string[];
   success_criteria: string[];
   context: string;

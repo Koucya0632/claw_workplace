@@ -28,7 +28,7 @@ export function StatusPill({ status, label }: StatusPillProps) {
   return (
     <span
       className={cn(
-        "inline-flex border-2 border-ink px-2 py-1 text-[10px] font-black uppercase tracking-[0.2em]",
+        "inline-flex rounded-full border border-ink/20 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em]",
         COLOR_MAP[status] ?? "bg-slate-100 text-slate-600"
       )}
     >

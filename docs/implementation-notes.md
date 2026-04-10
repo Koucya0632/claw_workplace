@@ -6,21 +6,21 @@
 - `api/`：FastAPI 後端與 SQLite/FTS5 檢索能力。
 - `samples/`：本地資料夾接入的範例檔案。
 
-## OpenClaw 管理整合 Phase 1 MVP
+## OpenClaw Control Center 整合 Phase 1 MVP
 
-本輪已新增 OpenClaw 管理整合骨架，重點如下：
+本輪已新增 OpenClaw Control Center 整合骨架，重點如下：
 
 - 後端新增 OpenClaw instance / secret / snapshot / operation log 資料表
 - 後端新增 agent capability registry，支援 per-agent `search_api` 能力開關
 - 後端新增 CLI adapter、hook client、instance/management/hook service 與管理 API
 - 後端新增 `openclaw/agent-tools/search`、`openclaw/agent-tools/document` 橋接 API，讓 agent 可查本專案索引
 - 後端新增 repo-local `project-search` 原生 plugin，取代舊的 workspace exec 搜索腳本
-- 前端新增 `OpenClaw 管理` 導覽與 `overview / instances / agents / devices / config / logs / actions` 頁面
-- 前端新增 `OpenClaw 管理 -> Daily News`，可設定單一 Daily News Brief 與查看新聞 workflow 鏈路
-- 前端新增 `OpenClaw 管理 -> System Inspection`，可設定版本巡檢、日誌視窗、Telegram 摘要與查看巡檢 workflow 鏈路
+- 前端新增 `OpenClaw Control Center` 導覽與 `overview / instances / agents / devices / config / logs / actions` 頁面
+- 前端新增 `OpenClaw Control Center -> Admin Tools -> Daily News`，可設定單一 Daily News Brief 與查看新聞 workflow 鏈路
+- 前端新增 `OpenClaw Control Center -> Admin Tools -> System Inspection`，可設定版本巡檢、日誌視窗、Telegram 摘要與查看巡檢 workflow 鏈路
 - 前端 Agents 頁可開關 `search_api`，並顯示 native plugin / ACPX bridge readiness
 - 新增 per-instance workflow agent mapping，可指定主控秘書 agent、核心搜索 / 分析 / 報告 agent，以及多專職 agent 與 handoff policy
-- 新增 OpenClaw 管理 API envelope，格式為 `success / data / error / meta`
+- 新增 OpenClaw Control Center API envelope，格式為 `success / data / error / meta`
 - 新增後端 mock adapter 測試與前端管理頁互動測試
 
 ## 搜索-分析-報告一體化流程

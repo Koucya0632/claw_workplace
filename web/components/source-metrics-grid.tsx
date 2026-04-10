@@ -6,10 +6,7 @@ export function SourceMetricsGrid({ metrics }: { metrics: SourceMetricsResponse 
     { label: "資料源總數", value: metrics.total_sources, tone: "bg-white" },
     { label: "正常來源", value: metrics.healthy_sources, tone: "bg-mint/70" },
     { label: "異常來源", value: metrics.warning_sources + metrics.failed_sources, tone: "bg-coral/15" },
-    { label: "同步中", value: metrics.syncing_sources, tone: "bg-gold/40" },
-    { label: "停用中", value: metrics.disabled_sources, tone: "bg-slate-100" },
-    { label: "近 7 天更新", value: metrics.recently_updated_sources, tone: "bg-sky-100/70" },
-    { label: "近期同步失敗", value: metrics.recent_sync_failures, tone: "bg-amber-100/80" }
+    { label: "同步中", value: metrics.syncing_sources, tone: "bg-gold/40" }
   ];
 
   return (

@@ -11,7 +11,8 @@ OpenClaw 智能辦公室目前是一套本地優先的多 agent 工作台，核�
 
 - `web/`：Next.js 像素風多角色工作台
 - `api/`：FastAPI 後端、SQLite metadata、FTS5 全文搜索
-- `openclaw management`：OpenClaw Instance / Agents / Devices / Config / Logs / Hooks 管理台
+- `packages/control-center-engine/`：由 `.openclaw-control-center-main` 內部化而來的 TS runtime / HTTP / SSE engine
+- `OpenClaw Control Center`：`/openclaw` 主控台與底下的 `Admin Tools`，包含 Instances / Agents / Devices / Config / Logs / Hooks
 - `samples/`：可直接拿來試跑的本地資料夾範例
 
 ## 開發前先讀
@@ -27,10 +28,11 @@ OpenClaw 智能辦公室目前是一套本地優先的多 agent 工作台，核�
 1. 複製 `.env.example` 為 `.env`
 2. 安裝依賴
 3. 啟動 API
-4. 啟動 Web
-5. 啟動 OpenClaw Gateway
+4. 啟動 Control Center Engine
+5. 啟動 Web
+6. 啟動 OpenClaw Gateway
 
-若只開 Web 或只開 API，管理台會部分可用；若要讓 OpenClaw 管理頁、Discord / Telegram、agent 派發與 workflow 都正常工作，**API 與 Gateway 需要同時存活**。
+若只開 Web 或只開 API，`OpenClaw Control Center` 會部分可用；若要讓融合後的 `/openclaw` 主控台、底下的 `Admin Tools`、Discord / Telegram、agent 派發與 workflow 都正常工作，**API、Control Center Engine 與 Gateway 需要同時存活**。
 
 ### 基本環境變數
 
@@ -41,6 +43,16 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 API_HOST=0.0.0.0
 API_PORT=8000
 OPENCLAW_DATABASE_PATH=./data/openclaw.sqlite3
+CONTROL_CENTER_ENGINE_PORT=4310
+CONTROL_CENTER_ENGINE_BASE_URL=http://127.0.0.1:4310
+OPENCLAW_RUNTIME_DIR=./data/control_center_runtime
+READONLY_MODE=true
+LOCAL_TOKEN_AUTH_REQUIRED=true
+APPROVAL_ACTIONS_ENABLED=false
+APPROVAL_ACTIONS_DRY_RUN=true
+IMPORT_MUTATION_ENABLED=false
+IMPORT_MUTATION_DRY_RUN=false
+GATEWAY_URL=ws://127.0.0.1:18789
 ```
 
 ### API
@@ -62,6 +74,20 @@ npm install
 npm run dev
 ```
 
+### Control Center Engine
+
+```bash
+cd /Users/rex/Desktop/claw_kaisya
+npm install
+npm run dev:control-center-engine
+```
+
+若要同時開 Web + Control Center Engine，可直接在專案根目錄執行：
+
+```bash
+npm run dev:control-center-ui
+```
+
 ### OpenClaw Gateway
 
 ```bash
@@ -78,6 +104,8 @@ openclaw gateway
 
 ```bash
 python3 -m pytest api/app/tests
+npm run build:control-center-engine
+npm run test:control-center-engine
 npm --workspace web run test
 npm --workspace web run build
 ```
@@ -98,17 +126,27 @@ MINIMAX_API_URL=https://api.minimaxi.com/v1/chat/completions
 MINIMAX_MODEL=MiniMax-M2.5
 ```
 
-## OpenClaw 管理整合
+## OpenClaw Control Center 整合
 
-本專案已新增 `OpenClaw 管理` 區域，提供：
+本專案已新增融合後的 `OpenClaw Control Center` 主控台，並把既有管理能力歸類到其底下的 `Admin Tools`，提供：
+
+- `/openclaw` 作為新的主控入口，並拆分 `Overview / Usage / Staff / Collaboration / Hall / Tasks / Documents / Memory / Settings`
+- 由 Next.js 同源代理 `/api/control-center/*` 連到內部 `control-center-engine`
+- 既有 `/openclaw/instances`、`/agents`、`/workflow`、`/devices`、`/logs` 等 `Admin Tools` 頁面完整保留
+- 整個 `/openclaw/*` 區域現在共用同一套 `OpenClaw Control Center` shell、導航分組與資訊層級
+- `/openclaw/*` 的排版骨架直接以 `.openclaw-control-center-main` 的實際 UI 結構為基準：left rail、hero head、overview-v3、hall 三欄與 task-room workbench 節奏都往 reference 對齊
+- `claw_kaisya` 只主導像素工作台的視覺語言、元件拆分與中文文案節奏，不再另外發明一套 OpenClaw 區域版型
+- control-center runtime / SSE / hall / task room / usage / diagnostics 能力保留在 `packages/control-center-engine/`
+
+`Admin Tools` 仍包含：
 
 - OpenClaw Instance 建立、編輯、健康檢查
 - Agents / Devices / Config / Logs 管理 API 與前端頁面
-- Workflow agent mapping 管理頁，可為每個 instance 指定主控秘書 agent、核心搜索 / 分析 / 報告 agent，以及多個專職 agent
-- Development 管理頁，可建立 `development_execution` workflow
-- Knowledge 管理頁，可回看 ingestion runs、版本鏈與來源治理
-- Daily News Brief 管理頁，可設定新聞主題、關鍵字、來源條件、Telegram 目標與每日排程
-- System Inspection 管理頁，可設定版本更新巡檢、日誌風險評估與 Telegram 摘要推送
+- Workflow agent mapping 頁，可為每個 instance 指定主控秘書 agent、核心搜索 / 分析 / 報告 agent，以及多個專職 agent
+- Development 頁，可建立 `development_execution` workflow
+- Knowledge 頁，可回看 ingestion runs、版本鏈與來源治理
+- Daily News Brief 頁，可設定新聞主題、關鍵字、來源條件、Telegram 目標與每日排程
+- System Inspection 頁，可設定版本更新巡檢、日誌風險評估與 Telegram 摘要推送
 - Sources 頁面已升級成 dashboard + management table + detail drawer，可做搜尋、篩選、排序、同步、編輯、啟用/停用與刪除
 - `/hooks/agent`、`/hooks/wake` 手動派發入口
 - 本專案自己的操作審計紀錄與快照摘要
@@ -153,9 +191,9 @@ MINIMAX_MODEL=MiniMax-M2.5
 
 - `Project Workflow`：搜索、分析、報告三個固定階段
 - `Web Search + Ingest`：`understand -> search -> filter -> ingest -> format` 五個固定階段
-- `Daily News Brief`：可在 OpenClaw 管理區設定每日新聞監控、去重、排序、摘要與 Telegram 投遞
-- `System Inspection`：可在 OpenClaw 管理區設定版本巡檢、日誌問題聚合、風險排序與升級建議
-- `Development`：可在 OpenClaw 管理區建立工程任務，強制保留問題定義、需求分析、方案設計、選型、排期、開發、測試、優化與 handoff
+- `Daily News Brief`：可在 `OpenClaw Control Center -> Admin Tools` 設定每日新聞監控、去重、排序、摘要與 Telegram 投遞
+- `System Inspection`：可在 `OpenClaw Control Center -> Admin Tools` 設定版本巡檢、日誌問題聚合、風險排序與升級建議
+- `Development`：可在 `OpenClaw Control Center -> Admin Tools` 建立工程任務，強制保留問題定義、需求分析、方案設計、選型、排期、開發、測試、優化與 handoff
 - 每個階段的負責 agent、狀態、進度、輸入與輸出
 - 目前正在處理中的 agent 與整體 workflow 進度
 - 完整事件時間線與最終結構化報告
@@ -171,7 +209,7 @@ MINIMAX_MODEL=MiniMax-M2.5
 
 它不再是主要接入入口；主要入口已是 `/search` 的 `Web Search + Ingest`。
 
-在啟動流程前，請先到 `OpenClaw 管理 -> Workflow` 為目標 instance 配置：
+在啟動流程前，請先到 `OpenClaw Control Center -> Admin Tools -> Workflow` 為目標 instance 配置：
 
 - `controller_agent_id`
 - `search_agent_id`
@@ -185,7 +223,7 @@ MINIMAX_MODEL=MiniMax-M2.5
 
 ### Development Workflow / Fullstack Engineer Agent
 
-在 `OpenClaw 管理 -> Workflow` 頁面中，可以把 `Fullstack Engineer Agent` 綁到 `specialist_agents.fullstack_engineer`；之後 `OpenClaw 管理 -> Development` 就能建立 `development_execution` workflow。
+在 `OpenClaw Control Center -> Admin Tools -> Workflow` 頁面中，可以把 `Fullstack Engineer Agent` 綁到 `specialist_agents.fullstack_engineer`；之後 `OpenClaw Control Center -> Admin Tools -> Development` 就能建立 `development_execution` workflow。
 
 這條 workflow 固定執行：
 
@@ -254,6 +292,8 @@ OPENCLAW_SYSTEM_INSPECTION_TELEGRAM_BOT_TOKEN=系統巡檢專用 Telegram bot to
 OPENCLAW_SYSTEM_INSPECTION_TELEGRAM_TIMEOUT_SECONDS=20
 OPENCLAW_SYSTEM_INSPECTION_DISCORD_BOT_TOKEN=系統巡檢專用 Discord bot token
 OPENCLAW_SYSTEM_INSPECTION_DISCORD_TIMEOUT_SECONDS=20
+OPENCLAW_DEVELOPMENT_DISCORD_BOT_TOKEN=Development workflow 專用 Discord bot token
+OPENCLAW_DEVELOPMENT_DISCORD_TIMEOUT_SECONDS=20
 OPENCLAW_KNOWLEDGE_DISCOVERY_TIMEOUT_SECONDS=15
 OPENCLAW_KNOWLEDGE_FETCH_TIMEOUT_SECONDS=20
 OPENCLAW_KNOWLEDGE_DEFAULT_LIMIT=5
@@ -265,12 +305,12 @@ OPENCLAW_KNOWLEDGE_DEFAULT_LIMIT=5
 
 - 基礎啟動：`NEXT_PUBLIC_API_BASE_URL`、`API_HOST`、`API_PORT`、`OPENCLAW_DATABASE_PATH`
 - OpenClaw / Gateway：`OPENCLAW_*`、`DISCORD_BOT_TOKEN`
-- Daily News / Inspection delivery：`OPENCLAW_DAILY_NEWS_*`、`OPENCLAW_SYSTEM_INSPECTION_*`
+- Daily News / Inspection / Development delivery：`OPENCLAW_DAILY_NEWS_*`、`OPENCLAW_SYSTEM_INSPECTION_*`、`OPENCLAW_DEVELOPMENT_*`
 - Knowledge ingest：`OPENCLAW_KNOWLEDGE_*`
 
 ### OpenClaw Agent 搜索能力
 
-在 `OpenClaw 管理 -> Agents` 頁面中，可以為個別 agent 開啟 `search_api`。啟用後，本專案會：
+在 `OpenClaw Control Center -> Admin Tools -> Agents` 頁面中，可以為個別 agent 開啟 `search_api`。啟用後，本專案會：
 
 - 自動 link / enable repo 內的 `openclaw-plugins/project-search`
 - 把 `plugins.entries.project-search.config` 寫入 OpenClaw config
@@ -291,7 +331,7 @@ OPENCLAW_KNOWLEDGE_DEFAULT_LIMIT=5
 
 ### Daily News Brief Agent
 
-在 `OpenClaw 管理 -> Daily News` 頁面中，可以為單一 instance 設定一份 Daily News Brief：
+在 `OpenClaw Control Center -> Admin Tools -> Daily News` 頁面中，可以為單一 instance 設定一份 Daily News Brief：
 
 - 新聞主題
 - 關鍵字 / 產業 / 地區 / 人物 / 公司
@@ -308,13 +348,13 @@ OPENCLAW_KNOWLEDGE_DEFAULT_LIMIT=5
 - `rank`
 - `brief`
 
-完成後會保留完整鏈路、最終 Markdown，以及 Telegram / Discord 投遞狀態；也可在管理頁手動重跑一次當日簡報。
+完成後會保留完整鏈路、最終 Markdown，以及 Telegram / Discord 投遞狀態；也可在 `Admin Tools` 頁手動重跑一次當日簡報。
 
 Daily News 的報告推送可切換 Telegram 或 Discord；Telegram 走 `OPENCLAW_DAILY_NEWS_TELEGRAM_BOT_TOKEN`，Discord 走 `OPENCLAW_DAILY_NEWS_DISCORD_BOT_TOKEN`，因此可以和 `.openclaw/openclaw.json` 裡主聊天 bot 分離，不會影響 `main` agent 的聊天 channel。
 
 ### System Inspection & Risk Assessment Agent
 
-在 `OpenClaw 管理 -> System Inspection` 頁面中，可以為單一 instance 設定一份應用層巡檢：
+在 `OpenClaw Control Center -> Admin Tools -> System Inspection` 頁面中，可以為單一 instance 設定一份應用層巡檢：
 
 - 每日巡檢排程（預設 `09:30 JST`）
 - 版本檢查開關

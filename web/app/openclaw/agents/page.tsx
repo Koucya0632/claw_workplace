@@ -27,6 +27,8 @@ export default function OpenClawAgentsPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [isPending, startTransition] = useTransition();
+  const hasInstances = instances.length > 0;
+  const canManageAgents = Boolean(selectedInstanceId);
 
   async function loadAgents(instanceId: string) {
     if (!instanceId) {
@@ -46,6 +48,10 @@ export default function OpenClawAgentsPage() {
         setSelectedInstanceId((current) => current || nextInstanceId);
         if (nextInstanceId) {
           await loadAgents(nextInstanceId);
+          setMessage("切換 Instance 後會自動同步 Agent 清單。");
+        } else {
+          setAgents([]);
+          setMessage("先建立 OpenClaw Instance，這裡才能建立與管理 Agent。");
         }
         setError("");
       } catch (requestError) {
@@ -130,9 +136,11 @@ export default function OpenClawAgentsPage() {
 
   return (
     <OpenClawPageShell
-      title="OpenClaw Agent 管理"
-      description="先選擇目標 Instance，再查看目前 Agent 清單或建立新的 Agent。這一版會直接管理原生搜索 plugin readiness，不再依賴 workspace exec 腳本。"
+      title="Agents"
+      description="Agents 是 OpenClaw Control Center 內的 Admin Tools 分區，先選擇目標 Instance，再查看 Agent 清單、建立 Agent 與管理原生搜索能力。"
       roles={AGENT_ROLES}
+      sectionGroup="Admin Tools"
+      sectionLabel="Agents"
     >
       <PixelCard title="Agent 控制區" eyebrow="Agents">
         <div className="grid gap-4 lg:grid-cols-[280px_auto_auto]">
@@ -140,11 +148,13 @@ export default function OpenClawAgentsPage() {
             instances={instances}
             value={selectedInstanceId}
             onChange={setSelectedInstanceId}
+            disabled={!hasInstances || isPending}
           />
           <button
             type="button"
             onClick={() => selectedInstanceId && loadAgents(selectedInstanceId)}
-            className="pixel-button bg-teal px-4 py-3 text-sm font-black tracking-[0.08em] text-white"
+            disabled={!canManageAgents || isPending}
+            className="pixel-button bg-teal px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
           >
             重新整理
           </button>
@@ -171,7 +181,7 @@ export default function OpenClawAgentsPage() {
           <button
             type="button"
             onClick={handleCreateAgent}
-            disabled={isPending}
+            disabled={!canManageAgents || isPending}
             className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60"
           >
             建立 Agent
@@ -226,7 +236,7 @@ export default function OpenClawAgentsPage() {
                     <button
                       type="button"
                       onClick={() => handleToggleSearchCapability(agent, !isSearchCapabilityEnabled(agent))}
-                      disabled={busyCapabilityAgentId === agent.id}
+                      disabled={busyCapabilityAgentId === agent.id || !canManageAgents}
                       className="pixel-button bg-coral px-4 py-2 text-xs font-black tracking-[0.08em] text-white disabled:opacity-60"
                     >
                       {busyCapabilityAgentId === agent.id

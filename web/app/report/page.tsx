@@ -14,12 +14,12 @@ function ReportRedirectContent() {
     router.replace(runId ? `/search?runId=${runId}` : "/search");
   }, [router, runId]);
 
-  return <div className="pixel-panel rounded-none p-6 text-sm text-slate-600">正在導向工作流報告視圖...</div>;
+  return <div className="status-strip rounded-[1.25rem] p-6 text-sm text-slate-600">正在導向工作流報告視圖...</div>;
 }
 
 export default function ReportPage() {
   return (
-    <Suspense fallback={<div className="pixel-panel rounded-none p-6 text-sm text-slate-600">正在載入報告頁...</div>}>
+    <Suspense fallback={<div className="status-strip rounded-[1.25rem] p-6 text-sm text-slate-600">正在載入報告頁...</div>}>
       <ReportRedirectContent />
     </Suspense>
   );

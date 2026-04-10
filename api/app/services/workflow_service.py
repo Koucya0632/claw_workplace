@@ -5,11 +5,13 @@ import re
 import random
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Any, Optional
 
 from app.repositories.openclaw_daily_news_config_repository import OpenClawDailyNewsConfigRepository
+from app.repositories.openclaw_development_config_repository import OpenClawDevelopmentConfigRepository
 from app.repositories.openclaw_agent_capability_repository import OpenClawAgentCapabilityRepository
 from app.repositories.openclaw_instance_repository import OpenClawInstanceRepository
 from app.repositories.openclaw_operation_log_repository import OpenClawOperationLogRepository
@@ -18,6 +20,7 @@ from app.repositories.openclaw_workflow_config_repository import OpenClawWorkflo
 from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.knowledge import KnowledgeIngestRequest
 from app.schemas.openclaw_daily_news import OpenClawDailyNewsConfigRequest, OpenClawDailyNewsConfigResponse
+from app.schemas.openclaw_development import OpenClawDevelopmentConfigRequest, OpenClawDevelopmentConfigResponse
 from app.schemas.openclaw_system_inspection import (
     OpenClawSystemInspectionConfigRequest,
     OpenClawSystemInspectionConfigResponse,
@@ -70,6 +73,7 @@ from app.schemas.workflow import (
 )
 from app.services.knowledge_ingestion_service import KnowledgeIngestionService
 from app.services.openclaw_cli_adapter import OpenClawCliAdapter
+from app.services.openclaw_cron_service import OpenClawCronSchedulingService, summarize_cron_reconcile_error
 from app.services.openclaw_errors import OpenClawServiceError
 from app.services.openclaw_hook_client import OpenClawHookClient
 from app.services.openclaw_release_client import OpenClawReleaseClient
@@ -103,6 +107,7 @@ IMPLEMENTATION_STAGE_KEY = "implementation"
 TESTING_STAGE_KEY = "testing"
 OPTIMIZATION_STAGE_KEY = "optimization"
 HANDOFF_STAGE_KEY = "handoff"
+DEVELOPMENT_DELIVERY_AGENT_ID = "fullstack-engineer-agent"
 
 SEARCH_REPORT_STAGE_SEQUENCE = (SEARCH_STAGE_KEY, ANALYSIS_STAGE_KEY, REPORT_STAGE_KEY)
 WEB_SEARCH_STAGE_SEQUENCE = (UNDERSTAND_STAGE_KEY, SEARCH_STAGE_KEY, FILTER_STAGE_KEY, INGEST_STAGE_KEY, FORMAT_STAGE_KEY)
@@ -119,6 +124,112 @@ DEVELOPMENT_EXECUTION_STAGE_SEQUENCE = (
     OPTIMIZATION_STAGE_KEY,
     HANDOFF_STAGE_KEY,
 )
+
+
+def _default_development_config(instance_id: str) -> OpenClawDevelopmentConfigResponse:
+    epoch = datetime.fromtimestamp(0, timezone.utc)
+    return OpenClawDevelopmentConfigResponse(
+        instance_id=instance_id,
+        enabled=False,
+        delivery_channel="discord",
+        discord_channel_id="",
+        last_run_id=None,
+        last_delivery_status=None,
+        last_delivery_error=None,
+        config_source="default",
+        effective_delivery_source="none",
+        effective_discord_channel_id=None,
+        effective_delivery_reason=None,
+        created_at=epoch,
+        updated_at=epoch,
+    )
+
+
+def _resolve_development_runtime_route_channel() -> str | None:
+    from app.config import REPO_ROOT, get_settings
+
+    settings = get_settings()
+    candidate_paths = [settings.openclaw_home_dir / "openclaw.json", REPO_ROOT / ".openclaw" / "openclaw.json"]
+    seen_paths: set[Path] = set()
+    for config_path in candidate_paths:
+        if config_path in seen_paths:
+            continue
+        seen_paths.add(config_path)
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        bindings = payload.get("bindings")
+        if not isinstance(bindings, list):
+            continue
+
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                continue
+            if binding.get("type") != "route" or binding.get("agentId") != DEVELOPMENT_DELIVERY_AGENT_ID:
+                continue
+
+            match = binding.get("match")
+            if not isinstance(match, dict) or match.get("channel") != "discord":
+                continue
+
+            peer = match.get("peer")
+            if not isinstance(peer, dict) or peer.get("kind") != "channel":
+                continue
+
+            channel_id = str(peer.get("id") or "").strip()
+            if channel_id:
+                return channel_id
+    return None
+
+
+def _resolve_development_delivery_target(
+    instance_id: str,
+    config: OpenClawDevelopmentConfigResponse | None,
+) -> dict[str, str | None]:
+    if config is not None:
+        if config.enabled and config.discord_channel_id.strip():
+            return {
+                "target": config.discord_channel_id.strip(),
+                "source": "development_config",
+                "reason": "已使用 Development 專屬 Discord 設定。",
+            }
+        return {
+            "target": None,
+            "source": "none",
+            "reason": "Development 專屬設定已停用 Discord 匯報。",
+        }
+
+    runtime_channel_id = _resolve_development_runtime_route_channel()
+    if runtime_channel_id:
+        return {
+            "target": runtime_channel_id,
+            "source": "runtime_route",
+            "reason": f"未找到 Development 專屬設定，已回退使用 Discord #develop route（{runtime_channel_id}）。",
+        }
+
+    return {
+        "target": None,
+        "source": "none",
+        "reason": "未找到 Development 專屬設定，且 runtime route 未配置 fullstack-engineer-agent 的 Discord channel。",
+    }
+
+
+def _enrich_development_config_response(
+    instance_id: str,
+    config: OpenClawDevelopmentConfigResponse | None,
+) -> OpenClawDevelopmentConfigResponse:
+    base = config.model_copy() if config is not None else _default_development_config(instance_id)
+    resolution = _resolve_development_delivery_target(instance_id, config)
+    return base.model_copy(
+        update={
+            "config_source": "stored" if config is not None else "default",
+            "effective_delivery_source": resolution["source"],
+            "effective_discord_channel_id": resolution["target"],
+            "effective_delivery_reason": resolution["reason"],
+        }
+    )
 
 SEARCH_REPORT_RUN_PROGRESS_START = {
     SEARCH_STAGE_KEY: 5,
@@ -246,6 +357,7 @@ class OpenClawWorkflowConfigService:
         operation_log_repository: Optional[OpenClawOperationLogRepository] = None,
         cli_adapter: Optional[OpenClawCliAdapter] = None,
         secret_cipher: Optional[OpenClawSecretCipher] = None,
+        cron_scheduling_service: Optional[OpenClawCronSchedulingService] = None,
     ) -> None:
         from app.config import get_settings
 
@@ -255,6 +367,13 @@ class OpenClawWorkflowConfigService:
         self.operation_log_repository = operation_log_repository or OpenClawOperationLogRepository()
         self.cli_adapter = cli_adapter or OpenClawCliAdapter()
         self.secret_cipher = secret_cipher or OpenClawSecretCipher(settings.openclaw_secret_key)
+        self.cron_scheduling_service = cron_scheduling_service or OpenClawCronSchedulingService(
+            repository=self.repository,
+            workflow_config_repository=self.workflow_config_repository,
+            operation_log_repository=self.operation_log_repository,
+            cli_adapter=self.cli_adapter,
+            secret_cipher=self.secret_cipher,
+        )
 
     def get_config(self, instance_id: str) -> tuple[OpenClawWorkflowConfigResponse, int]:
         started_at = time.perf_counter()
@@ -328,6 +447,20 @@ class OpenClawWorkflowConfigService:
                 response_summary=config.model_dump(mode="json"),
                 source_mode=self.source_mode,
             )
+            try:
+                self.cron_scheduling_service.reconcile_instance(payload.instance_id)
+            except Exception as error:  # noqa: BLE001
+                self.operation_log_repository.create(
+                    instance_id=payload.instance_id,
+                    operation_type="configure_workflow_agents_cron_reconcile",
+                    target_type="workflow_config",
+                    target_id=payload.instance_id,
+                    status="failed",
+                    error_message=summarize_cron_reconcile_error(error),
+                    request_summary={"instance_id": payload.instance_id},
+                    response_summary=None,
+                    source_mode=self.source_mode,
+                )
             return config, _elapsed_ms(started_at)
         except OpenClawServiceError as error:
             self.operation_log_repository.create(
@@ -358,10 +491,16 @@ class OpenClawDailyNewsConfigService:
         repository: Optional[OpenClawInstanceRepository] = None,
         daily_news_repository: Optional[OpenClawDailyNewsConfigRepository] = None,
         operation_log_repository: Optional[OpenClawOperationLogRepository] = None,
+        cron_scheduling_service: Optional[OpenClawCronSchedulingService] = None,
     ) -> None:
         self.repository = repository or OpenClawInstanceRepository()
         self.daily_news_repository = daily_news_repository or OpenClawDailyNewsConfigRepository()
         self.operation_log_repository = operation_log_repository or OpenClawOperationLogRepository()
+        self.cron_scheduling_service = cron_scheduling_service or OpenClawCronSchedulingService(
+            repository=self.repository,
+            daily_news_repository=self.daily_news_repository,
+            operation_log_repository=self.operation_log_repository,
+        )
 
     def get_config(self, instance_id: str) -> tuple[OpenClawDailyNewsConfigResponse, int]:
         started_at = time.perf_counter()
@@ -413,6 +552,20 @@ class OpenClawDailyNewsConfigService:
             response_summary=config.model_dump(mode="json"),
             source_mode=self.source_mode,
         )
+        try:
+            self.cron_scheduling_service.reconcile_instance(payload.instance_id)
+        except Exception as error:  # noqa: BLE001
+            self.operation_log_repository.create(
+                instance_id=payload.instance_id,
+                operation_type="configure_daily_news_cron_reconcile",
+                target_type="daily_news_config",
+                target_id=payload.instance_id,
+                status="failed",
+                error_message=summarize_cron_reconcile_error(error),
+                request_summary={"instance_id": payload.instance_id},
+                response_summary=None,
+                source_mode=self.source_mode,
+            )
         return config, _elapsed_ms(started_at)
 
 
@@ -424,10 +577,16 @@ class OpenClawSystemInspectionConfigService:
         repository: Optional[OpenClawInstanceRepository] = None,
         system_inspection_repository: Optional[OpenClawSystemInspectionConfigRepository] = None,
         operation_log_repository: Optional[OpenClawOperationLogRepository] = None,
+        cron_scheduling_service: Optional[OpenClawCronSchedulingService] = None,
     ) -> None:
         self.repository = repository or OpenClawInstanceRepository()
         self.system_inspection_repository = system_inspection_repository or OpenClawSystemInspectionConfigRepository()
         self.operation_log_repository = operation_log_repository or OpenClawOperationLogRepository()
+        self.cron_scheduling_service = cron_scheduling_service or OpenClawCronSchedulingService(
+            repository=self.repository,
+            system_inspection_repository=self.system_inspection_repository,
+            operation_log_repository=self.operation_log_repository,
+        )
 
     def get_config(self, instance_id: str) -> tuple[OpenClawSystemInspectionConfigResponse, int]:
         started_at = time.perf_counter()
@@ -464,6 +623,68 @@ class OpenClawSystemInspectionConfigService:
             response_summary=config.model_dump(mode="json"),
             source_mode=self.source_mode,
         )
+        try:
+            self.cron_scheduling_service.reconcile_instance(payload.instance_id)
+        except Exception as error:  # noqa: BLE001
+            self.operation_log_repository.create(
+                instance_id=payload.instance_id,
+                operation_type="configure_system_inspection_cron_reconcile",
+                target_type="system_inspection_config",
+                target_id=payload.instance_id,
+                status="failed",
+                error_message=summarize_cron_reconcile_error(error),
+                request_summary={"instance_id": payload.instance_id},
+                response_summary=None,
+                source_mode=self.source_mode,
+        )
+        return config, _elapsed_ms(started_at)
+
+
+class OpenClawDevelopmentConfigService:
+    source_mode = "repository"
+
+    def __init__(
+        self,
+        repository: Optional[OpenClawInstanceRepository] = None,
+        development_repository: Optional[OpenClawDevelopmentConfigRepository] = None,
+        operation_log_repository: Optional[OpenClawOperationLogRepository] = None,
+    ) -> None:
+        self.repository = repository or OpenClawInstanceRepository()
+        self.development_repository = development_repository or OpenClawDevelopmentConfigRepository()
+        self.operation_log_repository = operation_log_repository or OpenClawOperationLogRepository()
+
+    def get_config(self, instance_id: str) -> tuple[OpenClawDevelopmentConfigResponse, int]:
+        started_at = time.perf_counter()
+        self.repository.get(instance_id)
+        try:
+            stored_config = self.development_repository.get(instance_id)
+        except KeyError:
+            stored_config = None
+        return _enrich_development_config_response(instance_id, stored_config), _elapsed_ms(started_at)
+
+    def update_config(self, payload: OpenClawDevelopmentConfigRequest) -> tuple[OpenClawDevelopmentConfigResponse, int]:
+        started_at = time.perf_counter()
+        self.repository.get(payload.instance_id)
+        if payload.enabled and not payload.discord_channel_id.strip():
+            raise OpenClawServiceError(
+                "啟用 Development Discord 匯報前，必須填寫 Discord 頻道 ID。",
+                detail="delivery_channel=discord 時 discord_channel_id 必填。",
+                status_code=400,
+                source_mode=self.source_mode,
+            )
+
+        config = _enrich_development_config_response(payload.instance_id, self.development_repository.upsert(payload))
+        self.operation_log_repository.create(
+            instance_id=payload.instance_id,
+            operation_type="configure_development_delivery",
+            target_type="development_config",
+            target_id=payload.instance_id,
+            status="success",
+            error_message=None,
+            request_summary=payload.model_dump(),
+            response_summary=config.model_dump(mode="json"),
+            source_mode=self.source_mode,
+        )
         return config, _elapsed_ms(started_at)
 
 
@@ -477,6 +698,7 @@ class SearchReportWorkflowService:
         workflow_repository: Optional[WorkflowRepository] = None,
         workflow_config_repository: Optional[OpenClawWorkflowConfigRepository] = None,
         daily_news_repository: Optional[OpenClawDailyNewsConfigRepository] = None,
+        development_repository: Optional[OpenClawDevelopmentConfigRepository] = None,
         system_inspection_repository: Optional[OpenClawSystemInspectionConfigRepository] = None,
         capability_repository: Optional[OpenClawAgentCapabilityRepository] = None,
         operation_log_repository: Optional[OpenClawOperationLogRepository] = None,
@@ -484,6 +706,7 @@ class SearchReportWorkflowService:
         hook_client: Optional[OpenClawHookClient] = None,
         telegram_delivery_client: Optional[TelegramDeliveryClient] = None,
         discord_delivery_client: Optional[DiscordDeliveryClient] = None,
+        development_discord_delivery_client: Optional[DiscordDeliveryClient] = None,
         system_inspection_telegram_delivery_client: Optional[TelegramDeliveryClient] = None,
         system_inspection_discord_delivery_client: Optional[DiscordDeliveryClient] = None,
         cli_adapter: Optional[OpenClawCliAdapter] = None,
@@ -499,6 +722,7 @@ class SearchReportWorkflowService:
         self.workflow_repository = workflow_repository or WorkflowRepository()
         self.workflow_config_repository = workflow_config_repository or OpenClawWorkflowConfigRepository()
         self.daily_news_repository = daily_news_repository or OpenClawDailyNewsConfigRepository()
+        self.development_repository = development_repository or OpenClawDevelopmentConfigRepository()
         self.system_inspection_repository = system_inspection_repository or OpenClawSystemInspectionConfigRepository()
         self.capability_repository = capability_repository or OpenClawAgentCapabilityRepository()
         self.operation_log_repository = operation_log_repository or OpenClawOperationLogRepository()
@@ -506,6 +730,10 @@ class SearchReportWorkflowService:
         self.hook_client = hook_client or OpenClawHookClient()
         self.telegram_delivery_client = telegram_delivery_client or TelegramDeliveryClient.from_daily_news_settings()
         self.discord_delivery_client = discord_delivery_client or DiscordDeliveryClient.from_daily_news_settings()
+        self.development_discord_delivery_client = (
+            development_discord_delivery_client
+            or (discord_delivery_client if discord_delivery_client is not None else DiscordDeliveryClient.from_development_settings())
+        )
         self.system_inspection_telegram_delivery_client = (
             system_inspection_telegram_delivery_client
             or (telegram_delivery_client if telegram_delivery_client is not None else TelegramDeliveryClient.from_system_inspection_settings())
@@ -605,6 +833,15 @@ class SearchReportWorkflowService:
         config = self._get_config_or_error(payload.instance_id)
         daily_news_config = self._get_daily_news_config_or_error(payload.instance_id)
         stage_agents = _resolve_news_brief_stage_agents(config)
+        scheduled_date = payload.scheduled_date or self._today_in_timezone(daily_news_config.schedule_timezone)
+
+        if payload.trigger_source == "cron" and daily_news_config.last_scheduled_date == scheduled_date:
+            raise OpenClawServiceError(
+                "Daily News Brief 今日的自動排程已觸發過。",
+                detail=f"scheduled_date={scheduled_date}",
+                status_code=409,
+                source_mode=self.source_mode,
+            )
 
         run = self.workflow_repository.create_run(
             instance_id=payload.instance_id,
@@ -635,8 +872,34 @@ class SearchReportWorkflowService:
                 "topic": daily_news_config.topic,
                 "controller_agent_id": config.controller_agent_id,
                 "stage_agents": stage_agents,
+                "trigger_source": payload.trigger_source,
+                "scheduled_date": scheduled_date,
+                "cron_job_id": payload.cron_job_id,
+                "cron_job_name": payload.cron_job_name,
+                "cron_run_id": payload.cron_run_id,
             },
         )
+        if payload.trigger_source == "cron":
+            self.daily_news_repository.mark_run(
+                instance_id=payload.instance_id,
+                scheduled_date=scheduled_date,
+                run_id=run.id,
+            )
+            self.workflow_repository.add_event(
+                run_id=run.id,
+                stage_key=None,
+                agent_id=config.controller_agent_id,
+                status="pending",
+                progress_percent=0,
+                message="OpenClaw cron 已觸發 Daily News Brief，自動建立今日簡報流程。",
+                payload={
+                    "trigger_source": payload.trigger_source,
+                    "scheduled_date": scheduled_date,
+                    "cron_job_id": payload.cron_job_id,
+                    "cron_job_name": payload.cron_job_name,
+                    "cron_run_id": payload.cron_run_id,
+                },
+            )
         self._start_run(run.id)
         return self.workflow_repository.get_run(run.id), _elapsed_ms(started_at)
 
@@ -646,6 +909,15 @@ class SearchReportWorkflowService:
         config = self._get_config_or_error(payload.instance_id)
         inspection_config = self._get_system_inspection_config_or_error(payload.instance_id)
         stage_agents = _resolve_system_inspection_stage_agents(config)
+        scheduled_date = payload.scheduled_date or self._today_in_timezone(inspection_config.schedule_timezone)
+
+        if payload.trigger_source == "cron" and inspection_config.last_scheduled_date == scheduled_date:
+            raise OpenClawServiceError(
+                "System Inspection 今日的自動排程已觸發過。",
+                detail=f"scheduled_date={scheduled_date}",
+                status_code=409,
+                source_mode=self.source_mode,
+            )
 
         run = self.workflow_repository.create_run(
             instance_id=payload.instance_id,
@@ -671,8 +943,37 @@ class SearchReportWorkflowService:
             status="pending",
             progress_percent=0,
             message="主控秘書已建立系統巡檢與風險評估流程。",
-            payload={"stage_agents": stage_agents, "schedule_time": inspection_config.schedule_time},
+            payload={
+                "stage_agents": stage_agents,
+                "schedule_time": inspection_config.schedule_time,
+                "trigger_source": payload.trigger_source,
+                "scheduled_date": scheduled_date,
+                "cron_job_id": payload.cron_job_id,
+                "cron_job_name": payload.cron_job_name,
+                "cron_run_id": payload.cron_run_id,
+            },
         )
+        if payload.trigger_source == "cron":
+            self.system_inspection_repository.mark_run(
+                instance_id=payload.instance_id,
+                scheduled_date=scheduled_date,
+                run_id=run.id,
+            )
+            self.workflow_repository.add_event(
+                run_id=run.id,
+                stage_key=None,
+                agent_id=config.controller_agent_id,
+                status="pending",
+                progress_percent=0,
+                message="OpenClaw cron 已觸發 System Inspection，自動建立今日巡檢流程。",
+                payload={
+                    "trigger_source": payload.trigger_source,
+                    "scheduled_date": scheduled_date,
+                    "cron_job_id": payload.cron_job_id,
+                    "cron_job_name": payload.cron_job_name,
+                    "cron_run_id": payload.cron_run_id,
+                },
+            )
         self._start_run(run.id)
         return self.workflow_repository.get_run(run.id), _elapsed_ms(started_at)
 
@@ -1037,7 +1338,7 @@ class SearchReportWorkflowService:
             )
             self.daily_news_repository.mark_run(
                 instance_id=run.instance_id,
-                scheduled_date=self._jst_today(),
+                scheduled_date=self._scheduled_date_for_run(run, daily_news_config.schedule_timezone),
                 run_id=run.id,
                 delivery_status=delivery_status,
                 delivery_error=delivery_error,
@@ -1124,11 +1425,32 @@ class SearchReportWorkflowService:
                     delivery_status = "failed"
                     delivery_error = error.detail or error.message
 
+            repair_workflow_created = False
+            repair_workflow_run_id = None
+            repair_workflow_reason = None
+            if self._should_create_system_inspection_repair_workflow(report_output):
+                try:
+                    repair_request = self._build_system_inspection_repair_request(
+                        run=run,
+                        inspection_config=inspection_config,
+                        report_output=report_output,
+                    )
+                    repair_run, _ = self.create_development_execution_run(repair_request)
+                    repair_workflow_created = True
+                    repair_workflow_run_id = repair_run.id
+                except OpenClawServiceError as error:
+                    repair_workflow_reason = f"主控秘書已整理巡檢修復項，但建立 Development Workflow 失敗：{error.detail or error.message}"
+            else:
+                repair_workflow_reason = "本次巡檢無可執行修復項，因此未建立工程流程。"
+
             final_payload = report_output.model_copy(
                 update={
                     "delivery_status": delivery_status,
                     "delivery_target": delivery_target,
                     "delivery_error": delivery_error,
+                    "repair_workflow_created": repair_workflow_created,
+                    "repair_workflow_run_id": repair_workflow_run_id,
+                    "repair_workflow_reason": repair_workflow_reason,
                 }
             )
             self.workflow_repository.update_run_status(
@@ -1142,20 +1464,103 @@ class SearchReportWorkflowService:
             )
             self.system_inspection_repository.mark_run(
                 instance_id=run.instance_id,
-                scheduled_date=self._today_in_timezone(inspection_config.schedule_timezone),
+                scheduled_date=self._scheduled_date_for_run(run, inspection_config.schedule_timezone),
                 run_id=run.id,
                 delivery_status=delivery_status,
                 delivery_error=delivery_error,
             )
+            completion_message = "主控秘書已完成系統巡檢整合與風險建議整理。"
+            if repair_workflow_created and repair_workflow_run_id:
+                completion_message = "主控秘書已將巡檢修復項交給 Fullstack Engineer Agent，並建立 Development Workflow。"
+            elif repair_workflow_reason and "未建立工程流程" in repair_workflow_reason:
+                completion_message = "主控秘書已完成系統巡檢整合與風險建議整理，本次無需建立 Development Workflow。"
+            elif repair_workflow_reason:
+                completion_message = "主控秘書已完成系統巡檢整合與風險建議整理，但自動交辦 Development Workflow 失敗。"
             self._add_controller_event(
                 run_id=run.id,
                 controller_agent_id=config.controller_agent_id,
                 progress_percent=100,
-                message="主控秘書已完成系統巡檢整合與風險建議整理。",
-                payload={"upgrade_recommendation": report_output.version_update_check.upgrade_recommendation, "delivery_status": delivery_status},
+                message=completion_message,
+                payload={
+                    "upgrade_recommendation": report_output.version_update_check.upgrade_recommendation,
+                    "delivery_status": delivery_status,
+                    "repair_workflow_created": repair_workflow_created,
+                    "repair_workflow_run_id": repair_workflow_run_id,
+                    "repair_workflow_reason": repair_workflow_reason,
+                },
+                status="completed",
             )
         except OpenClawServiceError as error:
             self._mark_run_failed(run.id, error)
+
+    def _should_create_system_inspection_repair_workflow(
+        self,
+        report_output: WorkflowSystemInspectionReportPayload,
+    ) -> bool:
+        return bool(_dedupe_non_empty_strings(report_output.fix_and_optimization_actions)) or bool(report_output.high_priority_risks)
+
+    def _build_system_inspection_repair_request(
+        self,
+        *,
+        run: WorkflowRunResponse,
+        inspection_config: OpenClawSystemInspectionConfigResponse,
+        report_output: WorkflowSystemInspectionReportPayload,
+    ) -> WorkflowDevelopmentExecutionCreateRequest:
+        scheduled_date = self._scheduled_date_for_run(run, inspection_config.schedule_timezone)
+        instance = self.repository.get(run.instance_id)
+        task_name_parts = ["修復 System Inspection 發現問題"]
+        if instance.name.strip():
+            task_name_parts.append(instance.name.strip())
+        task_name_parts.append(scheduled_date or run.created_at.strftime("%Y-%m-%d"))
+
+        problem_background_parts = [
+            f"巡檢摘要：{'；'.join(_dedupe_non_empty_strings(report_output.inspection_summary)[:3])}",
+            f"版本差異：{report_output.version_update_check.version_gap}",
+            f"日誌觀察：{report_output.log_review.summary}",
+        ]
+        if report_output.high_priority_risks:
+            risk_summary = "；".join(
+                truncate_text(issue.description, max_length=120) for issue in report_output.high_priority_risks[:3]
+            )
+            problem_background_parts.append(f"高優先風險：{risk_summary}")
+
+        success_criteria = _dedupe_non_empty_strings(
+            [
+                *report_output.fix_and_optimization_actions,
+                *[action for issue in report_output.high_priority_risks for action in issue.fix_actions],
+                *report_output.version_update_check.regression_test_checklist,
+            ]
+        )
+        if not success_criteria:
+            success_criteria = ["完成本次巡檢列出的修復、驗證與交接。"]
+
+        context_payload = {
+            "system_inspection_run_id": run.id,
+            "trigger_source": run.input_payload.get("trigger_source"),
+            "version_update_check": _compact_system_version_output(report_output.version_update_check),
+            "log_review": _compact_system_log_review_output(report_output.log_review),
+            "high_priority_risks": [_compact_system_issue(issue) for issue in report_output.high_priority_risks[:5]],
+            "recommended_execution_order": report_output.recommended_execution_order[:6],
+        }
+
+        return WorkflowDevelopmentExecutionCreateRequest(
+            instance_id=run.instance_id,
+            task_name=" - ".join(task_name_parts),
+            problem_background="\n".join(part for part in problem_background_parts if part.strip()),
+            goal="根據系統巡檢結果完成修復、驗證與交接。",
+            trigger_source="system_inspection_handoff",
+            continued_from_run_id=run.id,
+            origin_workflow_type="system_inspection",
+            constraints=[
+                "沿用現有系統與部署方式",
+                "避免破壞現有 workflow / channel delivery",
+                "若涉及升級需先驗證相容性",
+            ],
+            success_criteria=success_criteria,
+            context=json.dumps(context_payload, ensure_ascii=False),
+            attachments=[],
+            references=[f"workflow_run:{run.id}", f"system_inspection_report:{run.id}"],
+        )
 
     def _execute_development_execution_run(self, run_id: str) -> None:
         run = self.workflow_repository.get_run(run_id)
@@ -1230,6 +1635,87 @@ class SearchReportWorkflowService:
                 testing_output,
                 optimization_output,
             )
+            delivery_status = "skipped"
+            delivery_target = None
+            delivery_error = None
+            delivery_source = "none"
+            delivery_reason = None
+            delivery_resolution = self._resolve_development_delivery_target(run.instance_id)
+            delivery_target = delivery_resolution["target"]
+            delivery_source = delivery_resolution["source"]
+            delivery_reason = delivery_resolution["reason"]
+            if delivery_target:
+                try:
+                    self._deliver_development_report(
+                        instance_id=run.instance_id,
+                        delivery_target=delivery_target,
+                        text=_build_development_delivery_markdown(run=run, report_payload=handoff_output),
+                        run_id=run.id,
+                    )
+                    delivery_status = "delivered"
+                    self.workflow_repository.add_event(
+                        run_id=run.id,
+                        stage_key=HANDOFF_STAGE_KEY,
+                        agent_id=config.controller_agent_id,
+                        status="completed",
+                        progress_percent=100,
+                        message="Development 匯報已推送到 Discord。",
+                        payload={
+                            "delivery_status": delivery_status,
+                            "delivery_target": delivery_target,
+                            "delivery_source": delivery_source,
+                            "delivery_reason": delivery_reason,
+                        },
+                    )
+                except OpenClawServiceError as report_delivery_error:
+                    delivery_status = "failed"
+                    delivery_error = report_delivery_error.detail or report_delivery_error.message
+                    self.workflow_repository.add_event(
+                        run_id=run.id,
+                        stage_key=HANDOFF_STAGE_KEY,
+                        agent_id=config.controller_agent_id,
+                        status="failed",
+                        progress_percent=100,
+                        message="Development 已完成，但 Discord 匯報推送失敗。",
+                        payload={
+                            "delivery_status": delivery_status,
+                            "delivery_target": delivery_target,
+                            "delivery_error": delivery_error,
+                            "delivery_source": delivery_source,
+                            "delivery_reason": delivery_reason,
+                        },
+                    )
+            else:
+                self.workflow_repository.add_event(
+                    run_id=run.id,
+                    stage_key=HANDOFF_STAGE_KEY,
+                    agent_id=config.controller_agent_id,
+                    status="completed",
+                    progress_percent=100,
+                    message="Development 已完成，但未找到 Discord 匯報目標，已略過外部匯報。",
+                    payload={
+                        "delivery_status": delivery_status,
+                        "delivery_target": delivery_target,
+                        "delivery_source": delivery_source,
+                        "delivery_reason": delivery_reason,
+                    },
+                )
+            if delivery_resolution["config"] is not None:
+                self.development_repository.mark_delivery(
+                    instance_id=run.instance_id,
+                    run_id=run.id,
+                    delivery_status=delivery_status,
+                    delivery_error=delivery_error,
+                )
+            handoff_output = handoff_output.model_copy(
+                update={
+                    "delivery_status": delivery_status,
+                    "delivery_target": delivery_target,
+                    "delivery_error": delivery_error,
+                    "delivery_source": delivery_source,
+                    "delivery_reason": delivery_reason,
+                }
+            )
 
             self.workflow_repository.update_run_status(
                 run_id=run.id,
@@ -1245,7 +1731,12 @@ class SearchReportWorkflowService:
                 controller_agent_id=config.controller_agent_id,
                 progress_percent=100,
                 message="主控秘書已收到全端工程師 Agent 的結構化開發報告。",
-                payload={"task_name": handoff_output.task_name, "final_summary": handoff_output.final_summary},
+                payload={
+                    "task_name": handoff_output.task_name,
+                    "final_summary": handoff_output.final_summary,
+                    "delivery_status": handoff_output.delivery_status,
+                    "delivery_target": handoff_output.delivery_target,
+                },
             )
             self.workflow_repository.add_event(
                 run_id=run.id,
@@ -1258,6 +1749,7 @@ class SearchReportWorkflowService:
             )
         except OpenClawServiceError as error:
             self._mark_run_failed(run.id, error)
+            self._deliver_failed_development_report(run_id=run.id, controller_agent_id=config.controller_agent_id)
 
     def _run_search_stage(self, run: WorkflowRunResponse, agent_id: str) -> WorkflowSearchStageOutput:
         input_payload = {
@@ -2400,26 +2892,86 @@ class SearchReportWorkflowService:
             "testing": testing_output.model_dump(),
             "optimization": optimization_output.model_dump(),
         }
-        return self._run_development_structured_stage(
-            run=run,
-            agent_id=agent_id,
+        self._mark_stage_running(
+            run_id=run.id,
             stage_key=HANDOFF_STAGE_KEY,
+            agent_id=agent_id,
             input_payload=input_payload,
+            run_progress=DEVELOPMENT_EXECUTION_RUN_PROGRESS_START[HANDOFF_STAGE_KEY],
+            stage_progress=DEVELOPMENT_EXECUTION_STAGE_RUNNING_PROGRESS[HANDOFF_STAGE_KEY],
             message="主控秘書正在接收全端工程師 Agent 的結構化開發報告...",
-            prompt=_build_development_handoff_prompt(
-                problem_output,
-                requirements_output,
-                design_output,
-                technology_output,
-                planning_output,
-                implementation_output,
-                testing_output,
-                optimization_output,
-            ),
-            schema=WorkflowDevelopmentExecutionReportPayload,
-            completion_message="已完成結構化匯報並交還給 Main Agent。",
-            completion_payload={"task_name": problem_output.task_name, "final_summary": optimization_output.summary},
         )
+        try:
+            response_payload = self._dispatch_agent(
+                instance_id=run.instance_id,
+                agent_id=agent_id,
+                session_key=f"{run.id}-{HANDOFF_STAGE_KEY}",
+                message=_build_development_handoff_prompt(
+                    problem_output,
+                    requirements_output,
+                    design_output,
+                    technology_output,
+                    planning_output,
+                    implementation_output,
+                    testing_output,
+                    optimization_output,
+                ),
+                metadata={"workflow_run_id": run.id, "stage_key": HANDOFF_STAGE_KEY, "workflow_type": run.workflow_type},
+            )
+            handoff_fallback_reason = None
+            try:
+                output = _parse_agent_output(
+                    response_payload,
+                    WorkflowDevelopmentExecutionReportPayload,
+                    f"Development {HANDOFF_STAGE_KEY} 階段",
+                )
+            except OpenClawServiceError as error:
+                output = _build_development_handoff_output_fallback(
+                    problem_output=problem_output,
+                    requirements_output=requirements_output,
+                    design_output=design_output,
+                    technology_output=technology_output,
+                    planning_output=planning_output,
+                    implementation_output=implementation_output,
+                    testing_output=testing_output,
+                    optimization_output=optimization_output,
+                    error=error,
+                )
+                handoff_fallback_reason = error.detail or error.message
+            self.workflow_repository.update_stage(
+                run_id=run.id,
+                stage_key=HANDOFF_STAGE_KEY,
+                status="completed",
+                progress_percent=100,
+                output_payload=output.model_dump(),
+                completed_at=utc_now_iso(),
+            )
+            self.workflow_repository.update_run_status(
+                run_id=run.id,
+                status="running",
+                current_stage=HANDOFF_STAGE_KEY,
+                active_agent_id=agent_id,
+                overall_progress_percent=DEVELOPMENT_EXECUTION_RUN_PROGRESS_DONE[HANDOFF_STAGE_KEY],
+                error_message=None,
+            )
+            self.workflow_repository.add_event(
+                run_id=run.id,
+                stage_key=HANDOFF_STAGE_KEY,
+                agent_id=agent_id,
+                status="completed",
+                progress_percent=DEVELOPMENT_EXECUTION_RUN_PROGRESS_DONE[HANDOFF_STAGE_KEY],
+                message="已完成結構化匯報並交還給 Main Agent。",
+                payload={
+                    "task_name": output.task_name,
+                    "final_summary": output.final_summary,
+                    "fallback_used": bool(handoff_fallback_reason),
+                    "fallback_reason": handoff_fallback_reason,
+                },
+            )
+            return output
+        except OpenClawServiceError as error:
+            self._mark_stage_failed(run_id=run.id, stage_key=HANDOFF_STAGE_KEY, agent_id=agent_id, error=error)
+            raise
 
     def _run_system_snapshot_stage(
         self,
@@ -2475,6 +3027,7 @@ class SearchReportWorkflowService:
         inspection_config: OpenClawSystemInspectionConfigResponse,
         snapshot_output: WorkflowSystemInspectionSnapshotOutput,
     ) -> WorkflowSystemInspectionVersionOutput:
+        cli_update_summary = self._fetch_cli_update_summary()
         official_release = self._fetch_official_release_summary(inspection_config.official_release_url) if inspection_config.version_check_enabled else {
             "latest_version": None,
             "release_summary": [],
@@ -2483,6 +3036,7 @@ class SearchReportWorkflowService:
         input_payload = {
             "inspection_config": inspection_config.model_dump(mode="json"),
             "snapshot_output": snapshot_output.model_dump(),
+            "cli_update_summary": cli_update_summary,
             "official_release": official_release,
         }
         self._mark_stage_running(
@@ -2499,10 +3053,21 @@ class SearchReportWorkflowService:
                 instance_id=run.instance_id,
                 agent_id=agent_id,
                 session_key=f"{run.id}-{VERSION_CHECK_STAGE_KEY}",
-                message=_build_system_version_check_prompt(snapshot_output, official_release),
+                message=_build_system_version_check_prompt(snapshot_output, cli_update_summary, official_release),
                 metadata={"workflow_run_id": run.id, "stage_key": VERSION_CHECK_STAGE_KEY, "workflow_type": run.workflow_type},
             )
-            version_output = _parse_agent_output(response_payload, WorkflowSystemInspectionVersionOutput, "系統巡檢版本階段")
+            version_fallback_reason = None
+            try:
+                version_output = _parse_agent_output(response_payload, WorkflowSystemInspectionVersionOutput, "系統巡檢版本階段")
+            except OpenClawServiceError as error:
+                version_output = _build_system_version_output_fallback(
+                    snapshot_output=snapshot_output,
+                    cli_update_summary=cli_update_summary,
+                    official_release=official_release,
+                    error=error,
+                )
+                version_fallback_reason = error.detail or error.message
+            version_output = _normalize_system_version_output(version_output, snapshot_output, cli_update_summary, official_release)
             self.workflow_repository.update_stage(
                 run_id=run.id,
                 stage_key=VERSION_CHECK_STAGE_KEY,
@@ -2526,7 +3091,13 @@ class SearchReportWorkflowService:
                 status="completed",
                 progress_percent=SYSTEM_INSPECTION_RUN_PROGRESS_DONE[VERSION_CHECK_STAGE_KEY],
                 message="版本差異與升級風險評估已完成。",
-                payload={"current_version": version_output.current_version, "latest_version": version_output.latest_version, "recommendation": version_output.upgrade_recommendation},
+                payload={
+                    "current_version": version_output.current_version,
+                    "latest_version": version_output.latest_version,
+                    "recommendation": version_output.upgrade_recommendation,
+                    "fallback_used": bool(version_fallback_reason),
+                    "fallback_reason": version_fallback_reason,
+                },
             )
             return version_output
         except OpenClawServiceError as error:
@@ -2563,7 +3134,17 @@ class SearchReportWorkflowService:
                 message=_build_system_log_review_prompt(inspection_config, aggregated_issues),
                 metadata={"workflow_run_id": run.id, "stage_key": LOG_REVIEW_STAGE_KEY, "workflow_type": run.workflow_type},
             )
-            log_review_output = _parse_agent_output(response_payload, WorkflowSystemInspectionLogReviewOutput, "系統巡檢日誌階段")
+            log_review_fallback_reason = None
+            try:
+                log_review_output = _parse_agent_output(response_payload, WorkflowSystemInspectionLogReviewOutput, "系統巡檢日誌階段")
+            except OpenClawServiceError as error:
+                log_review_output = _build_system_log_review_output_fallback(
+                    inspection_config=inspection_config,
+                    aggregated_issues=aggregated_issues,
+                    snapshot_output=snapshot_output,
+                    error=error,
+                )
+                log_review_fallback_reason = error.detail or error.message
             self.workflow_repository.update_stage(
                 run_id=run.id,
                 stage_key=LOG_REVIEW_STAGE_KEY,
@@ -2587,7 +3168,11 @@ class SearchReportWorkflowService:
                 status="completed",
                 progress_percent=SYSTEM_INSPECTION_RUN_PROGRESS_DONE[LOG_REVIEW_STAGE_KEY],
                 message="高頻錯誤、重複性問題與效能風險已整理完成。",
-                payload={"issue_count": len(log_review_output.issues)},
+                payload={
+                    "issue_count": len(log_review_output.issues),
+                    "fallback_used": bool(log_review_fallback_reason),
+                    "fallback_reason": log_review_fallback_reason,
+                },
             )
             return log_review_output
         except OpenClawServiceError as error:
@@ -2624,7 +3209,16 @@ class SearchReportWorkflowService:
                 message=_build_system_risk_assessment_prompt(version_output, log_review_output),
                 metadata={"workflow_run_id": run.id, "stage_key": RISK_ASSESSMENT_STAGE_KEY, "workflow_type": run.workflow_type},
             )
-            risk_output = _parse_agent_output(response_payload, WorkflowSystemInspectionRiskOutput, "系統巡檢風險階段")
+            risk_fallback_reason = None
+            try:
+                risk_output = _parse_agent_output(response_payload, WorkflowSystemInspectionRiskOutput, "系統巡檢風險階段")
+            except OpenClawServiceError as error:
+                risk_output = _build_system_risk_output_fallback(
+                    version_output=version_output,
+                    log_review_output=log_review_output,
+                    error=error,
+                )
+                risk_fallback_reason = error.detail or error.message
             self.workflow_repository.update_stage(
                 run_id=run.id,
                 stage_key=RISK_ASSESSMENT_STAGE_KEY,
@@ -2648,7 +3242,11 @@ class SearchReportWorkflowService:
                 status="completed",
                 progress_percent=SYSTEM_INSPECTION_RUN_PROGRESS_DONE[RISK_ASSESSMENT_STAGE_KEY],
                 message="高優先級風險與立即行動建議已完成。",
-                payload={"high_priority_count": len(risk_output.high_priority_risks)},
+                payload={
+                    "high_priority_count": len(risk_output.high_priority_risks),
+                    "fallback_used": bool(risk_fallback_reason),
+                    "fallback_reason": risk_fallback_reason,
+                },
             )
             return risk_output
         except OpenClawServiceError as error:
@@ -2701,7 +3299,18 @@ class SearchReportWorkflowService:
                 ),
                 metadata={"workflow_run_id": run.id, "stage_key": REPORT_STAGE_KEY, "workflow_type": run.workflow_type},
             )
-            report_output = _parse_system_report_output(response_payload, version_output, log_review_output, risk_output)
+            report_fallback_reason = None
+            try:
+                report_output = _parse_system_report_output(response_payload, version_output, log_review_output, risk_output)
+            except OpenClawServiceError as error:
+                report_output = _build_system_report_output_fallback(
+                    version_output=version_output,
+                    log_review_output=log_review_output,
+                    risk_output=risk_output,
+                    error=error,
+                )
+                report_fallback_reason = error.detail or error.message
+            report_output = _normalize_system_report_payload(report_output, version_output, log_review_output, risk_output)
             self.workflow_repository.update_stage(
                 run_id=run.id,
                 stage_key=REPORT_STAGE_KEY,
@@ -2718,6 +3327,19 @@ class SearchReportWorkflowService:
                 overall_progress_percent=100,
                 final_payload=report_output.model_dump(),
                 error_message=None,
+            )
+            self.workflow_repository.add_event(
+                run_id=run.id,
+                stage_key=REPORT_STAGE_KEY,
+                agent_id=agent_id,
+                status="completed",
+                progress_percent=100,
+                message="巡檢總結報告已完成。",
+                payload={
+                    "fallback_used": bool(report_fallback_reason),
+                    "fallback_reason": report_fallback_reason,
+                    "title": report_output.title,
+                },
             )
             return report_output
         except OpenClawServiceError as error:
@@ -2815,6 +3437,21 @@ class SearchReportWorkflowService:
                 "latest_version_status": "unknown",
                 "assumption": error.detail or error.message,
                 "verification_steps": [f"手動打開 {url} 確認最新 release 或 changelog。"],
+            }
+
+    def _fetch_cli_update_summary(self) -> dict[str, Any]:
+        try:
+            return self.cli_adapter.get_update_summary()
+        except OpenClawServiceError as error:
+            return {
+                "generated_at": utc_now_iso(),
+                "status": "unknown",
+                "current_version": None,
+                "latest_version": None,
+                "channel_label": None,
+                "update_available": False,
+                "assumption": error.detail or error.message,
+                "verification_steps": ["手動執行 `openclaw status --json` 與 `openclaw update status --json` 確認最新版本狀態。"],
             }
 
     def _mark_stage_running(
@@ -3035,6 +3672,18 @@ class SearchReportWorkflowService:
                 source_mode=self.source_mode,
             ) from error
 
+    def _get_development_config(self, instance_id: str) -> OpenClawDevelopmentConfigResponse | None:
+        try:
+            return self.development_repository.get(instance_id)
+        except KeyError:
+            return None
+
+    def _resolve_development_delivery_target(self, instance_id: str) -> dict[str, Any]:
+        config = self._get_development_config(instance_id)
+        resolution = _resolve_development_delivery_target(instance_id, config)
+        resolution["config"] = config
+        return resolution
+
     def _load_context(self, instance_id: str):
         instance = self.repository.get(instance_id)
         encrypted_token = self.repository.get_secret(instance_id)
@@ -3169,6 +3818,126 @@ class SearchReportWorkflowService:
             )
             raise
 
+    def _deliver_development_report(
+        self,
+        *,
+        instance_id: str,
+        delivery_target: str,
+        text: str,
+        run_id: str,
+    ) -> None:
+        request_summary = {"delivery_channel": "discord", "delivery_target": delivery_target, "run_id": run_id}
+        try:
+            result = self.development_discord_delivery_client.send_text(channel_id=delivery_target, text=text)
+            self.operation_log_repository.create(
+                instance_id=instance_id,
+                operation_type="deliver_development_report",
+                target_type="discord",
+                target_id=delivery_target,
+                status="success",
+                error_message=None,
+                request_summary=request_summary,
+                response_summary={
+                    "channel_id": result.get("channel_id"),
+                    "message_ids": result.get("message_ids"),
+                    "message_count": result.get("message_count"),
+                },
+                source_mode=self.development_discord_delivery_client.source_mode,
+            )
+        except OpenClawServiceError as error:
+            self.operation_log_repository.create(
+                instance_id=instance_id,
+                operation_type="deliver_development_report",
+                target_type="discord",
+                target_id=delivery_target,
+                status="failed",
+                error_message=error.detail or error.message,
+                request_summary=request_summary,
+                response_summary=None,
+                source_mode=error.source_mode or self.development_discord_delivery_client.source_mode,
+            )
+            raise
+
+    def _deliver_failed_development_report(self, *, run_id: str, controller_agent_id: str | None = None) -> None:
+        failed_run = self.workflow_repository.get_run(run_id)
+        delivery_resolution = self._resolve_development_delivery_target(failed_run.instance_id)
+        delivery_target = delivery_resolution["target"]
+        delivery_status = "delivered"
+        delivery_error = None
+        delivery_source = delivery_resolution["source"]
+        delivery_reason = delivery_resolution["reason"]
+        if not delivery_target:
+            self.workflow_repository.add_event(
+                run_id=failed_run.id,
+                stage_key=failed_run.current_stage,
+                agent_id=controller_agent_id or failed_run.active_agent_id,
+                status="completed",
+                progress_percent=failed_run.overall_progress_percent,
+                message="Development 失敗後未找到 Discord 匯報目標，已略過外部匯報。",
+                payload={
+                    "delivery_status": "skipped",
+                    "delivery_target": None,
+                    "delivery_source": delivery_source,
+                    "delivery_reason": delivery_reason,
+                },
+            )
+            if delivery_resolution["config"] is not None:
+                self.development_repository.mark_delivery(
+                    instance_id=failed_run.instance_id,
+                    run_id=failed_run.id,
+                    delivery_status="skipped",
+                    delivery_error=None,
+                )
+            return
+
+        try:
+            self._deliver_development_report(
+                instance_id=failed_run.instance_id,
+                delivery_target=delivery_target,
+                text=_build_failed_development_delivery_markdown(failed_run),
+                run_id=failed_run.id,
+            )
+            self.workflow_repository.add_event(
+                run_id=failed_run.id,
+                stage_key=failed_run.current_stage,
+                agent_id=controller_agent_id or failed_run.active_agent_id,
+                status="completed",
+                progress_percent=failed_run.overall_progress_percent,
+                message="Development 失敗摘要已推送到 Discord。",
+                payload={
+                    "delivery_status": delivery_status,
+                    "delivery_target": delivery_target,
+                    "delivery_source": delivery_source,
+                    "delivery_reason": delivery_reason,
+                },
+            )
+        except OpenClawServiceError as error:
+            delivery_status = "failed"
+            delivery_error = error.detail or error.message
+            self.workflow_repository.add_event(
+                run_id=failed_run.id,
+                stage_key=failed_run.current_stage,
+                agent_id=controller_agent_id or failed_run.active_agent_id,
+                status="failed",
+                progress_percent=failed_run.overall_progress_percent,
+                message="Development 失敗後嘗試推送 Discord 摘要，但發送失敗。",
+                payload={
+                    "delivery_status": delivery_status,
+                    "delivery_target": delivery_target,
+                    "delivery_error": delivery_error,
+                    "delivery_source": delivery_source,
+                    "delivery_reason": delivery_reason,
+                },
+            )
+
+        if delivery_resolution["config"] is not None:
+            self.development_repository.mark_delivery(
+                instance_id=failed_run.instance_id,
+                run_id=failed_run.id,
+                delivery_status=delivery_status,
+                delivery_error=delivery_error,
+            )
+
     @staticmethod
     def _jst_today() -> str:
         return datetime.now(ZoneInfo("Asia/Tokyo")).date().isoformat()
@@ -3179,6 +3948,12 @@ class SearchReportWorkflowService:
             return datetime.now(ZoneInfo(timezone_name)).date().isoformat()
         except Exception:
             return datetime.now(ZoneInfo("Asia/Tokyo")).date().isoformat()
+
+    def _scheduled_date_for_run(self, run: WorkflowRunResponse, timezone_name: str) -> str:
+        candidate = run.input_payload.get("scheduled_date")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+        return self._today_in_timezone(timezone_name)
 
     def _add_controller_event(
         self,
@@ -3631,18 +4406,24 @@ def _build_news_brief_prompt(
 
 def _build_system_version_check_prompt(
     snapshot_output: WorkflowSystemInspectionSnapshotOutput,
+    cli_update_summary: dict[str, Any],
     official_release: dict[str, Any],
 ) -> str:
     return (
-        "你是 OpenClaw 系統巡檢的版本更新代理。請比對目前版本與官方最新版本，並給出工程維運視角的升級建議。\n"
+        "你是 OpenClaw 系統巡檢的版本更新代理。請以 CLI update summary 作為版本真源，並用官方 release 摘要補充 breaking changes、相容性與升級注意事項。\n"
         f"系統快照：{json.dumps(snapshot_output.model_dump(), ensure_ascii=False)}\n"
-        f"官方來源摘要：{json.dumps(official_release, ensure_ascii=False)}\n"
-        "若官方版本未知，必須標註假設與驗證方法，不可直接建議升級。\n"
+        f"CLI update summary（真源）：{json.dumps(cli_update_summary, ensure_ascii=False)}\n"
+        f"官方 release 摘要（輔助上下文）：{json.dumps(official_release, ensure_ascii=False)}\n"
+        "latest_version、latest_version_status、update_available、channel_label 必須優先依據 CLI update summary；官方 release 摘要不能覆蓋 CLI 的版本判斷。\n"
+        "若 CLI update summary 無法取得，必須標註假設與驗證方法，不可把 docs 頁面上的第一個版本號當成真源。\n"
         "只輸出 JSON。\n"
         "{\n"
         '  "current_version": "...",\n'
         '  "latest_version": "...",\n'
         '  "latest_version_status": "available|unknown|skipped",\n'
+        '  "update_available": true,\n'
+        '  "channel_label": "stable (default)",\n'
+        '  "version_source": "openclaw_cli_update|official_release_fallback|unknown",\n'
         '  "version_gap": "...",\n'
         '  "release_summary": ["..."],\n'
         '  "breaking_changes": ["..."],\n'
@@ -3656,6 +4437,467 @@ def _build_system_version_check_prompt(
         "}\n"
         "不要輸出額外文字。"
     )
+
+
+def _normalize_system_version_output(
+    version_output: WorkflowSystemInspectionVersionOutput,
+    snapshot_output: WorkflowSystemInspectionSnapshotOutput,
+    cli_update_summary: dict[str, Any],
+    official_release: dict[str, Any],
+) -> WorkflowSystemInspectionVersionOutput:
+    cli_current_version = _optional_clean_string(cli_update_summary.get("current_version"))
+    cli_latest_version = _optional_clean_string(cli_update_summary.get("latest_version"))
+    cli_channel_label = _optional_clean_string(cli_update_summary.get("channel_label"))
+    cli_update_available = cli_update_summary.get("update_available")
+    release_summary = version_output.release_summary or [
+        item for item in official_release.get("release_summary", []) if isinstance(item, str) and item.strip()
+    ]
+
+    if cli_current_version or cli_latest_version:
+        latest_version_status = "available" if cli_latest_version else "unknown"
+        version_source = "openclaw_cli_update"
+    else:
+        latest_version_status = str(official_release.get("latest_version_status") or version_output.latest_version_status or "unknown")
+        version_source = "official_release_fallback" if official_release.get("latest_version") else "unknown"
+
+    return version_output.model_copy(
+        update={
+            "current_version": cli_current_version or snapshot_output.current_version or version_output.current_version,
+            "latest_version": cli_latest_version or version_output.latest_version,
+            "latest_version_status": latest_version_status,
+            "update_available": cli_update_available if isinstance(cli_update_available, bool) else version_output.update_available,
+            "channel_label": cli_channel_label or version_output.channel_label,
+            "version_source": version_source,
+            "release_summary": release_summary,
+        }
+    )
+
+
+def _build_system_version_output_fallback(
+    *,
+    snapshot_output: WorkflowSystemInspectionSnapshotOutput,
+    cli_update_summary: dict[str, Any],
+    official_release: dict[str, Any],
+    error: OpenClawServiceError,
+) -> WorkflowSystemInspectionVersionOutput:
+    cli_current_version = _optional_clean_string(cli_update_summary.get("current_version"))
+    cli_latest_version = _optional_clean_string(cli_update_summary.get("latest_version"))
+    cli_channel_label = _optional_clean_string(cli_update_summary.get("channel_label"))
+    cli_update_available = cli_update_summary.get("update_available")
+
+    release_summary = [
+        item for item in official_release.get("release_summary", []) if isinstance(item, str) and item.strip()
+    ]
+    latest_version_status = "available" if cli_latest_version else str(official_release.get("latest_version_status") or "unknown")
+    latest_version = cli_latest_version or _optional_clean_string(official_release.get("latest_version"))
+    current_version = cli_current_version or snapshot_output.current_version or "unknown"
+    update_available = bool(cli_update_available) if isinstance(cli_update_available, bool) else bool(latest_version)
+    version_gap = ""
+    if current_version and latest_version:
+        version_gap = "matched" if current_version == latest_version else f"{current_version} -> {latest_version}"
+
+    assumptions = [f"Agent 未回傳可解析文字，版本欄位改採 CLI update summary fallback：{error.detail or error.message}"]
+    assumption = _optional_clean_string(cli_update_summary.get("assumption"))
+    if assumption:
+        assumptions.append(assumption)
+
+    verification_steps = [
+        "重新執行 `openclaw status --json` 與 `openclaw update status --json` 確認版本資訊。",
+    ]
+    verification_steps.extend(
+        item for item in cli_update_summary.get("verification_steps", []) if isinstance(item, str) and item.strip()
+    )
+
+    compatibility_risks = list(
+        dict.fromkeys(
+            item for item in official_release.get("compatibility_risks", []) if isinstance(item, str) and item.strip()
+        )
+    )
+
+    return WorkflowSystemInspectionVersionOutput(
+        current_version=current_version,
+        latest_version=latest_version,
+        latest_version_status=latest_version_status,
+        update_available=update_available,
+        channel_label=cli_channel_label,
+        version_source="openclaw_cli_update" if cli_current_version or cli_latest_version else "official_release_fallback",
+        version_gap=version_gap,
+        release_summary=release_summary,
+        breaking_changes=[
+            item for item in official_release.get("breaking_changes", []) if isinstance(item, str) and item.strip()
+        ],
+        deprecations=[
+            item for item in official_release.get("deprecations", []) if isinstance(item, str) and item.strip()
+        ],
+        compatibility_risks=compatibility_risks,
+        affected_areas={
+            key: [item for item in value if isinstance(item, str) and item.strip()]
+            for key, value in official_release.get("affected_areas", {}).items()
+            if isinstance(key, str) and isinstance(value, list)
+        },
+        upgrade_recommendation="test_before_upgrade" if latest_version and latest_version != current_version else "do_not_upgrade_yet",
+        regression_test_checklist=[
+            item for item in official_release.get("regression_test_checklist", []) if isinstance(item, str) and item.strip()
+        ],
+        assumptions=assumptions,
+        verification_steps=list(dict.fromkeys(verification_steps)),
+    )
+
+
+def _normalize_system_report_payload(
+    report_output: WorkflowSystemInspectionReportPayload,
+    version_output: WorkflowSystemInspectionVersionOutput,
+    log_review_output: WorkflowSystemInspectionLogReviewOutput,
+    risk_output: WorkflowSystemInspectionRiskOutput,
+) -> WorkflowSystemInspectionReportPayload:
+    title = report_output.title.strip() or "系統巡檢與風險評估報告"
+    draft = WorkflowSystemInspectionReportDraft(
+        title=title,
+        inspection_summary=report_output.inspection_summary,
+        fix_and_optimization_actions=report_output.fix_and_optimization_actions,
+        open_questions=report_output.open_questions,
+        recommended_execution_order=report_output.recommended_execution_order,
+        telegram_summary=report_output.telegram_summary,
+        markdown=report_output.markdown,
+    )
+    markdown = _build_system_inspection_markdown(
+        title,
+        version_output,
+        log_review_output,
+        risk_output,
+        draft,
+    )
+    telegram_summary = draft.telegram_summary.strip() or _build_system_inspection_telegram_summary(
+        title,
+        version_output,
+        risk_output,
+        draft,
+    )
+    return report_output.model_copy(
+        update={
+            "version_update_check": version_output,
+            "telegram_summary": telegram_summary,
+            "markdown": markdown,
+        }
+    )
+
+
+def _build_system_report_output_fallback(
+    *,
+    version_output: WorkflowSystemInspectionVersionOutput,
+    log_review_output: WorkflowSystemInspectionLogReviewOutput,
+    risk_output: WorkflowSystemInspectionRiskOutput,
+    error: OpenClawServiceError,
+) -> WorkflowSystemInspectionReportPayload:
+    inspection_summary = _dedupe_non_empty_strings(
+        [
+            risk_output.summary,
+            log_review_output.summary,
+            f"版本更新檢查：{version_output.current_version} -> {version_output.latest_version or 'unknown'} ({version_output.upgrade_recommendation})",
+        ]
+    )
+    fix_and_optimization_actions = _dedupe_non_empty_strings(
+        [
+            *risk_output.immediate_actions,
+            *[action for issue in risk_output.high_priority_risks for action in issue.fix_actions],
+            *version_output.regression_test_checklist,
+        ]
+    )
+    recommended_execution_order = fix_and_optimization_actions[:] or _dedupe_non_empty_strings(
+        [
+            "先確認版本資訊與 CLI update summary 一致。",
+            "再依高優先風險逐項修復與驗證。",
+        ]
+    )
+    open_questions = _dedupe_non_empty_strings(
+        [
+            *version_output.assumptions,
+            *risk_output.assumptions,
+            f"Agent 未回傳可解析文字，巡檢報告改採 deterministic fallback：{error.detail or error.message}",
+        ]
+    )
+    draft = WorkflowSystemInspectionReportDraft(
+        title="系統巡檢與風險評估報告",
+        inspection_summary=inspection_summary,
+        fix_and_optimization_actions=fix_and_optimization_actions,
+        open_questions=open_questions,
+        recommended_execution_order=recommended_execution_order,
+        telegram_summary="",
+        markdown="",
+    )
+    return _coerce_system_report_output(draft, version_output, log_review_output, risk_output)
+
+
+def _build_system_risk_output_fallback(
+    *,
+    version_output: WorkflowSystemInspectionVersionOutput,
+    log_review_output: WorkflowSystemInspectionLogReviewOutput,
+    error: OpenClawServiceError,
+) -> WorkflowSystemInspectionRiskOutput:
+    prioritized_issues = sorted(
+        log_review_output.issues,
+        key=lambda issue: (_severity_rank(issue.severity), issue.priority, -issue.frequency),
+    )
+    high_priority_risks = [
+        issue for issue in prioritized_issues if issue.severity in {"critical", "high"} or issue.priority in {"p0", "p1"}
+    ][:5]
+    if not high_priority_risks:
+        high_priority_risks = prioritized_issues[:3]
+
+    immediate_actions = _dedupe_non_empty_strings(
+        [
+            *[action for issue in high_priority_risks for action in issue.fix_actions],
+            *[action for issue in high_priority_risks for action in issue.optimization_actions],
+            *version_output.regression_test_checklist,
+        ]
+    )
+    if not immediate_actions and version_output.latest_version and version_output.latest_version != version_output.current_version:
+        immediate_actions = [
+            "先修復目前高優先風險，再決定是否進行版本升級。",
+            "完成 staging 回歸驗證後再評估升級正式環境。",
+        ]
+
+    summary_parts = []
+    if high_priority_risks:
+        top_issue = high_priority_risks[0]
+        summary_parts.append(
+            f"目前已整理出 {len(high_priority_risks)} 項高優先風險，最急迫的是 {truncate_text(top_issue.description, max_length=80)}。"
+        )
+    if log_review_output.summary:
+        summary_parts.append(truncate_text(log_review_output.summary, max_length=140))
+    if version_output.latest_version and version_output.latest_version != version_output.current_version:
+        summary_parts.append(
+            f"版本面目前建議 {version_output.upgrade_recommendation}，先確認 {version_output.current_version} 到 {version_output.latest_version} 的相容性。"
+        )
+    summary_parts.append("Agent 未回傳可解析文字，本次風險結論改採 deterministic fallback。")
+
+    assumptions = _dedupe_non_empty_strings(
+        [
+            *version_output.assumptions,
+            f"fallback reason: {error.detail or error.message}",
+        ]
+    )
+    verification_steps = _dedupe_non_empty_strings(
+        [
+            *[step for issue in high_priority_risks for step in issue.verification_steps],
+            *version_output.verification_steps,
+            "修復後重新執行 System Inspection，確認 risk_assessment 與 report 皆能完成。",
+        ]
+    )
+
+    return WorkflowSystemInspectionRiskOutput(
+        summary=" ".join(summary_parts),
+        upgrade_recommendation=version_output.upgrade_recommendation,
+        high_priority_risks=high_priority_risks,
+        immediate_actions=immediate_actions,
+        assumptions=assumptions,
+        verification_steps=verification_steps,
+    )
+
+
+def _build_development_handoff_output_fallback(
+    *,
+    problem_output: WorkflowDevelopmentProblemDefinitionOutput,
+    requirements_output: WorkflowDevelopmentRequirementsOutput,
+    design_output: WorkflowDevelopmentDesignOutput,
+    technology_output: WorkflowDevelopmentTechnologySelectionOutput,
+    planning_output: WorkflowDevelopmentTaskPlanningOutput,
+    implementation_output: WorkflowDevelopmentImplementationOutput,
+    testing_output: WorkflowDevelopmentTestingOutput,
+    optimization_output: WorkflowDevelopmentOptimizationOutput,
+    error: OpenClawServiceError,
+) -> WorkflowDevelopmentExecutionReportPayload:
+    requirements_analysis = _dedupe_non_empty_strings(
+        [
+            *requirements_output.functional_requirements,
+            *requirements_output.non_functional_requirements,
+            *requirements_output.risks,
+        ]
+    )
+    solution_design = _dedupe_non_empty_strings(
+        [
+            *design_output.modules,
+            *design_output.flows,
+            *design_output.interfaces,
+            *design_output.data_structures,
+        ]
+    )
+    development_results = _dedupe_non_empty_strings(
+        [
+            implementation_output.summary,
+            *implementation_output.completed_items,
+            *implementation_output.changed_modules,
+            *implementation_output.notable_decisions,
+        ]
+    )
+    test_results = _dedupe_non_empty_strings(
+        [
+            testing_output.summary,
+            *testing_output.test_results,
+            *testing_output.test_cases,
+        ]
+    )
+    risks_and_todos = _dedupe_non_empty_strings(
+        [
+            *testing_output.remaining_gaps,
+            *optimization_output.follow_up_todos,
+            *optimization_output.known_limits,
+            f"handoff fallback reason: {error.detail or error.message}",
+        ]
+    )
+    final_summary_parts = _dedupe_non_empty_strings(
+        [
+            optimization_output.summary,
+            implementation_output.summary,
+            testing_output.summary,
+            "Main Agent 未回傳可解析文字，handoff 改採 deterministic fallback 匯總前序工程階段成果。",
+        ]
+    )
+
+    return WorkflowDevelopmentExecutionReportPayload(
+        task_name=problem_output.task_name,
+        problem_definition=problem_output.problem_background,
+        requirements_analysis=requirements_analysis,
+        solution_design=solution_design,
+        technology_selection=technology_output.selections,
+        task_breakdown_schedule=planning_output.tasks,
+        development_results=development_results,
+        test_results=test_results,
+        risks_and_todos=risks_and_todos,
+        final_summary=" ".join(final_summary_parts),
+    )
+
+
+def _build_development_delivery_markdown(
+    *,
+    run: WorkflowRunResponse,
+    report_payload: WorkflowDevelopmentExecutionReportPayload,
+) -> str:
+    sections = [
+        f"# Development Workflow Report\n\n## Task\n- {report_payload.task_name}",
+        f"## Final Summary\n{report_payload.final_summary}",
+        f"## Problem Definition\n{report_payload.problem_definition}",
+        _render_markdown_list("Requirements Analysis", report_payload.requirements_analysis),
+        _render_markdown_list("Solution Design", report_payload.solution_design),
+        _render_markdown_list("Development Results", report_payload.development_results),
+        _render_markdown_list("Test Results", report_payload.test_results),
+        _render_markdown_list("Risks And Todos", report_payload.risks_and_todos),
+        _render_development_technology_markdown(report_payload.technology_selection),
+        _render_development_schedule_markdown(report_payload.task_breakdown_schedule),
+        f"## Run\n- Workflow ID: {run.id}\n- Instance ID: {run.instance_id}\n- OpenClaw URL: /openclaw/development?instanceId={run.instance_id}&runId={run.id}",
+    ]
+    return "\n\n".join(section for section in sections if section.strip())
+
+
+def _build_failed_development_delivery_markdown(run: WorkflowRunResponse) -> str:
+    recent_stage_event = next((event for event in reversed(run.events) if event.stage_key == run.current_stage), None)
+    summary = run.error_message or (
+        recent_stage_event.message.strip() if recent_stage_event and recent_stage_event.message.strip() else "Development workflow failed."
+    )
+    message_lines = [
+        "# Development Workflow Failed",
+        "",
+        "## Task",
+        f"- {run.input_payload.get('task_name') or '未命名工程任務'}",
+        f"- Workflow ID: {run.id}",
+        f"- Instance ID: {run.instance_id}",
+        f"- Failed Stage: {run.current_stage or 'unknown'}",
+        "",
+        "## Failure Summary",
+        str(summary).strip(),
+    ]
+    if recent_stage_event and recent_stage_event.message.strip():
+        message_lines.extend(["", "## Latest Event", recent_stage_event.message.strip()])
+    message_lines.extend(["", f"OpenClaw URL: /openclaw/development?instanceId={run.instance_id}&runId={run.id}"])
+    return "\n".join(line for line in message_lines if line is not None)
+
+
+def _render_markdown_list(title: str, items: list[str]) -> str:
+    cleaned = _dedupe_non_empty_strings(items)
+    if not cleaned:
+        return ""
+    body = "\n".join(f"- {item}" for item in cleaned[:8])
+    return f"## {title}\n{body}"
+
+
+def _render_development_technology_markdown(items: list[Any]) -> str:
+    if not items:
+        return ""
+    rows = []
+    for item in items[:8]:
+        if not hasattr(item, "category"):
+            continue
+        rows.append(f"- {item.category}: {item.choice} ({item.reason})")
+    return f"## Technology Selection\n" + "\n".join(rows) if rows else ""
+
+
+def _render_development_schedule_markdown(items: list[Any]) -> str:
+    if not items:
+        return ""
+    rows = []
+    for item in items[:8]:
+        if not hasattr(item, "title"):
+            continue
+        rows.append(f"- {item.title} [{item.priority} / {item.estimate}] {item.description}".strip())
+    return f"## Task Breakdown\n" + "\n".join(rows) if rows else ""
+
+
+def _build_system_log_review_output_fallback(
+    *,
+    inspection_config: OpenClawSystemInspectionConfigResponse,
+    aggregated_issues: list[WorkflowSystemInspectionLogIssue],
+    snapshot_output: WorkflowSystemInspectionSnapshotOutput,
+    error: OpenClawServiceError,
+) -> WorkflowSystemInspectionLogReviewOutput:
+    summary_parts = []
+    if aggregated_issues:
+        summary_parts.append(
+            f"已從 operation logs、workflow failures 與 gateway logs 整理出 {len(aggregated_issues)} 項可觀測問題。"
+        )
+        top_issue = aggregated_issues[0]
+        summary_parts.append(f"目前最需要先處理的是 {truncate_text(top_issue.description, max_length=96)}。")
+    else:
+        summary_parts.append("近期日誌未聚合出明確高優先問題。")
+
+    if snapshot_output.recent_workflow_failures:
+        summary_parts.append(f"近期 workflow failure 共 {len(snapshot_output.recent_workflow_failures)} 筆。")
+    if snapshot_output.gateway_log_excerpt:
+        summary_parts.append(f"gateway logs 摘錄 {len(snapshot_output.gateway_log_excerpt)} 筆。")
+    summary_parts.append("Agent 未回傳可解析文字，本次日誌巡檢改採 deterministic fallback。")
+    summary_parts.append(f"fallback reason: {error.detail or error.message}")
+
+    return WorkflowSystemInspectionLogReviewOutput(
+        summary=" ".join(summary_parts),
+        issues=aggregated_issues[:8],
+        log_window_hours=inspection_config.log_review_window_hours,
+        inspected_log_count=(
+            len(snapshot_output.recent_operation_logs)
+            + len(snapshot_output.recent_workflow_failures)
+            + len(snapshot_output.gateway_log_excerpt)
+        ),
+    )
+
+
+def _optional_clean_string(value: Any) -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    return None
+
+
+def _dedupe_non_empty_strings(values: list[Any]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _optional_clean_string(value)
+        if not normalized:
+            continue
+        key = normalized.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+    return deduped
 
 
 def _build_system_log_review_prompt(
@@ -4087,6 +5329,9 @@ def _compact_system_version_output(version_output: WorkflowSystemInspectionVersi
         "current_version": version_output.current_version,
         "latest_version": version_output.latest_version,
         "latest_version_status": version_output.latest_version_status,
+        "update_available": version_output.update_available,
+        "channel_label": version_output.channel_label,
+        "version_source": version_output.version_source,
         "version_gap": truncate_text(version_output.version_gap, max_length=120),
         "upgrade_recommendation": version_output.upgrade_recommendation,
         "release_summary": [truncate_text(str(item), max_length=140) for item in version_output.release_summary[:4]],
@@ -4580,9 +5825,15 @@ def _is_agent_timeout_error(error: OpenClawServiceError) -> bool:
 def _parse_agent_output(payload: dict[str, Any], schema, stage_label: str):
     text_payload = _extract_agent_text(payload)
     if not text_payload:
+        structured_payload = _extract_structured_agent_payload(payload)
+        if structured_payload is not None:
+            try:
+                return schema(**structured_payload)
+            except Exception:
+                pass
         raise OpenClawServiceError(
             f"{stage_label} 沒有產出可解析文字。",
-            detail=truncate_text(json.dumps(payload, ensure_ascii=False)),
+            detail=_build_missing_text_detail(payload),
             source_mode="workflow",
         )
 
@@ -4606,7 +5857,7 @@ def _parse_system_report_output(
     if not text_payload:
         raise OpenClawServiceError(
             "系統巡檢報告階段沒有產出可解析文字。",
-            detail=truncate_text(json.dumps(payload, ensure_ascii=False)),
+            detail=_build_missing_text_detail(payload),
             source_mode="workflow",
         )
 
@@ -4633,11 +5884,231 @@ def _extract_agent_text(payload: dict[str, Any]) -> str:
             for item in payloads:
                 if isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip():
                     return item["text"].strip()
+        for key in ["text", "output_text", "content"]:
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        message = result.get("message")
+        if isinstance(message, dict):
+            for key in ["text", "content"]:
+                value = message.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        if isinstance(message, str) and message.strip():
+            return message.strip()
 
-    if isinstance(payload.get("text"), str):
-        return payload["text"].strip()
-
+    for key in ["text", "output_text", "content"]:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    message = payload.get("message")
+    if isinstance(message, dict):
+        for key in ["text", "content"]:
+            value = message.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    if isinstance(message, str) and message.strip():
+        return message.strip()
     return ""
+
+
+def _extract_structured_agent_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    for candidate in _iter_structured_payload_candidates(payload):
+        if isinstance(candidate, dict):
+            return candidate
+    return None
+
+
+def _iter_structured_payload_candidates(value: Any) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def visit(node: Any, depth: int = 0) -> None:
+        if depth > 4:
+            return
+
+        node_id = id(node)
+        if node_id in seen:
+            return
+        seen.add(node_id)
+
+        if isinstance(node, dict):
+            if _looks_like_structured_agent_payload(node):
+                candidates.append(node)
+
+            result = node.get("result")
+            if isinstance(result, dict):
+                visit(result, depth + 1)
+                payloads = result.get("payloads")
+                if isinstance(payloads, list):
+                    for item in payloads:
+                        visit(item, depth + 1)
+
+            for key in ("payload", "content", "message", "detail", "error", "data", "value"):
+                child = node.get(key)
+                if isinstance(child, dict):
+                    visit(child, depth + 1)
+                elif isinstance(child, str):
+                    parsed = _parse_structured_json_candidate(child)
+                    if isinstance(parsed, dict):
+                        visit(parsed, depth + 1)
+
+        elif isinstance(node, list):
+            for item in node:
+                visit(item, depth + 1)
+        elif isinstance(node, str):
+            parsed = _parse_structured_json_candidate(node)
+            if isinstance(parsed, dict):
+                visit(parsed, depth + 1)
+
+    visit(value)
+    return candidates
+
+
+def _parse_structured_json_candidate(value: str) -> dict[str, Any] | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = _extract_json_object(text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _looks_like_structured_agent_payload(payload: dict[str, Any]) -> bool:
+    summary = _optional_clean_string(payload.get("summary"))
+    if not summary:
+        return False
+
+    structured_list_fields = (
+        "completed_items",
+        "changed_modules",
+        "notable_decisions",
+        "test_cases",
+        "test_results",
+        "improvements",
+        "follow_up_todos",
+        "tasks",
+        "schedule",
+        "functional_requirements",
+        "non_functional_requirements",
+        "risks",
+        "dependencies",
+        "modules",
+        "flows",
+        "data_structures",
+        "interfaces",
+        "selections",
+    )
+    return any(isinstance(payload.get(key), list) for key in structured_list_fields)
+
+
+def _build_missing_text_detail(payload: dict[str, Any]) -> str:
+    result = payload.get("result")
+    result_payload = result if isinstance(result, dict) else {}
+    meta = result_payload.get("meta") if isinstance(result_payload, dict) else None
+    meta_payload = meta if isinstance(meta, dict) else {}
+    agent_meta = meta_payload.get("agentMeta") if isinstance(meta_payload.get("agentMeta"), dict) else {}
+
+    fields = _detect_text_field_presence(payload)
+    details: list[str] = []
+    status = _optional_clean_string(payload.get("status"))
+    summary = _optional_clean_string(payload.get("summary"))
+    provider = _optional_clean_string(agent_meta.get("provider"))
+    model = _optional_clean_string(agent_meta.get("model"))
+    structured_payload = _extract_structured_agent_payload(payload)
+    structured_summary = _optional_clean_string(structured_payload.get("summary")) if isinstance(structured_payload, dict) else None
+    structured_highlights = _collect_structured_payload_highlights(structured_payload)
+
+    if structured_summary:
+        details.append(f"summary={structured_summary}")
+    elif summary:
+        details.append(f"summary={summary}")
+
+    for item in structured_highlights[:3]:
+        details.append(item)
+
+    if status:
+        details.append(f"status={status}")
+    if provider:
+        details.append(f"provider={provider}")
+    if model:
+        details.append(f"model={model}")
+    details.append(
+        "text_fields=" + (",".join(fields) if fields else "none")
+    )
+
+    detail = " / ".join(details)
+    return truncate_text(detail or json.dumps(payload, ensure_ascii=False), 400)
+
+
+def _collect_structured_payload_highlights(payload: dict[str, Any] | None) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+
+    highlights: list[str] = []
+    field_labels = {
+        "completed_items": "completed",
+        "changed_modules": "modules",
+        "notable_decisions": "decisions",
+        "test_results": "tests",
+        "improvements": "improvements",
+        "follow_up_todos": "todos",
+        "tasks": "tasks",
+    }
+
+    for key, label in field_labels.items():
+        value = payload.get(key)
+        if not isinstance(value, list):
+            continue
+        cleaned = [
+            _optional_clean_string(item)
+            for item in value
+            if isinstance(item, str) and _optional_clean_string(item)
+        ]
+        if cleaned:
+            highlights.append(f"{label}={'; '.join(cleaned[:2])}")
+
+    return highlights
+
+
+def _detect_text_field_presence(payload: dict[str, Any]) -> list[str]:
+    fields: list[str] = []
+    result = payload.get("result")
+    if isinstance(result, dict):
+        payloads = result.get("payloads")
+        if isinstance(payloads, list):
+            for item in payloads:
+                if isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip():
+                    fields.append("result.payloads[].text")
+                    break
+        for key in ["text", "output_text", "content"]:
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                fields.append(f"result.{key}")
+        message = result.get("message")
+        if isinstance(message, dict):
+            for key in ["text", "content"]:
+                value = message.get(key)
+                if isinstance(value, str) and value.strip():
+                    fields.append(f"result.message.{key}")
+        elif isinstance(message, str) and message.strip():
+            fields.append("result.message")
+    for key in ["text", "output_text", "content"]:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            fields.append(key)
+    message = payload.get("message")
+    if isinstance(message, dict):
+        for key in ["text", "content"]:
+            value = message.get(key)
+            if isinstance(value, str) and value.strip():
+                fields.append(f"message.{key}")
+    elif isinstance(message, str) and message.strip():
+        fields.append("message")
+
+    return fields
 
 
 def _extract_json_object(text_payload: str) -> dict[str, Any]:

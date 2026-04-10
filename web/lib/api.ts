@@ -9,6 +9,7 @@ import type {
   OpenClawConfigResponse,
   OpenClawConfigValidationResponse,
   OpenClawDailyNewsConfigResponse,
+  OpenClawDevelopmentConfigResponse,
   OpenClawDeviceSummary,
   OpenClawHealthResponse,
   OpenClawInstanceResponse,
@@ -466,6 +467,23 @@ export async function updateOpenClawSystemInspectionConfig(payload: OpenClawSyst
   official_release_url: string;
 }) {
   return requestOpenClaw<OpenClawSystemInspectionConfigResponse>("/openclaw/system-inspection-config", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchOpenClawDevelopmentConfig(instanceId: string) {
+  const params = new URLSearchParams({ instanceId });
+  return requestOpenClaw<OpenClawDevelopmentConfigResponse>(`/openclaw/development-config?${params.toString()}`);
+}
+
+export async function updateOpenClawDevelopmentConfig(payload: OpenClawDevelopmentConfigResponse | {
+  instance_id: string;
+  enabled: boolean;
+  delivery_channel: "discord";
+  discord_channel_id: string;
+}) {
+  return requestOpenClaw<OpenClawDevelopmentConfigResponse>("/openclaw/development-config", {
     method: "POST",
     body: JSON.stringify(payload)
   });

@@ -9,6 +9,7 @@ import { WorkflowEventTimeline } from "@/components/workflow-event-timeline";
 import { WorkflowReportPanel } from "@/components/workflow-report-panel";
 import { WorkflowRunList } from "@/components/workflow-run-list";
 import { WorkflowStageBoard } from "@/components/workflow-stage-board";
+import { summarizeWorkflowRuntimeIssue } from "@/lib/workflow-payloads";
 import {
   createNewsBriefWorkflow,
   fetchOpenClawDailyNewsConfig,
@@ -54,6 +55,11 @@ const DAILY_NEWS_ROLES = [
   { name: "Delivery", tagline: "Telegram / Discord 推送", status: "ready", quote: "簡報完成後會推送到你指定的 Telegram 或 Discord 目標，並保留完整鏈路供回看。" }
 ];
 
+function formatDailyNewsError(error: unknown, fallback: string) {
+  if (!(error instanceof Error)) return fallback;
+  return summarizeWorkflowRuntimeIssue(error.message, "Daily News Brief agent") ?? error.message;
+}
+
 function toLines(value: string[]) {
   return value.join("\n");
 }
@@ -72,8 +78,10 @@ export default function OpenClawDailyNewsPage() {
   const [runs, setRuns] = useState<WorkflowRunResponse[]>([]);
   const [activeRun, setActiveRun] = useState<WorkflowRunResponse | null>(null);
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("設定 Daily News Brief 條件後，可手動執行一次，也會每天 09:00 JST 自動推送。");
+  const [message, setMessage] = useState("設定 Daily News Brief 條件後，可手動執行一次；自動排程則由 OpenClaw cron 每天觸發。");
   const [isPending, startTransition] = useTransition();
+  const hasInstances = instances.length > 0;
+  const canManageDailyNews = Boolean(selectedInstanceId);
 
   useEffect(() => {
     startTransition(async () => {
@@ -81,20 +89,32 @@ export default function OpenClawDailyNewsPage() {
         const instancePayload = await fetchOpenClawInstances();
         setInstances(instancePayload);
         setSelectedInstanceId((current) => current || instancePayload[0]?.id || "");
+        if (instancePayload.length === 0) {
+          setConfig(DEFAULT_CONFIG);
+          setRuns([]);
+          setActiveRun(null);
+          setMessage("先建立 OpenClaw Instance，再設定 Daily News Brief。");
+        }
       } catch (requestError) {
-        setError(requestError instanceof Error ? requestError.message : "無法載入 OpenClaw Instances");
+        setError(formatDailyNewsError(requestError, "無法載入 OpenClaw Instances"));
       }
     });
   }, [startTransition]);
 
   useEffect(() => {
-    if (!selectedInstanceId) return;
+    if (!selectedInstanceId) {
+      setConfig(DEFAULT_CONFIG);
+      setRuns([]);
+      setActiveRun(null);
+      return;
+    }
     startTransition(async () => {
       try {
         const [configResult, runResult] = await Promise.allSettled([
           fetchOpenClawDailyNewsConfig(selectedInstanceId),
           fetchWorkflowRuns({ instanceId: selectedInstanceId, workflowType: "news_brief", limit: 8 })
         ]);
+        let nextError = "";
         if (configResult.status === "fulfilled") {
           setConfig(configResult.value);
         } else {
@@ -104,10 +124,14 @@ export default function OpenClawDailyNewsPage() {
         if (runResult.status === "fulfilled") {
           setRuns(runResult.value);
           setActiveRun(runResult.value[0] ?? null);
+        } else {
+          setRuns([]);
+          setActiveRun(null);
+          nextError = formatDailyNewsError(runResult.reason, "無法載入 Daily News 資料");
         }
-        setError("");
+        setError(nextError);
       } catch (requestError) {
-        setError(requestError instanceof Error ? requestError.message : "無法載入 Daily News 資料");
+        setError(formatDailyNewsError(requestError, "無法載入 Daily News 資料"));
       }
     });
   }, [selectedInstanceId, startTransition]);
@@ -122,7 +146,7 @@ export default function OpenClawDailyNewsPage() {
         setActiveRun(nextRun);
         setRuns(await fetchWorkflowRuns({ instanceId: selectedInstanceId, workflowType: "news_brief", limit: 8 }));
       } catch (requestError) {
-        setError(requestError instanceof Error ? requestError.message : "輪詢 Daily News run 失敗");
+        setError(formatDailyNewsError(requestError, "輪詢 Daily News run 失敗"));
       }
     }, 1500);
     return () => window.clearInterval(timer);
@@ -163,7 +187,7 @@ export default function OpenClawDailyNewsPage() {
         setConfig(saved);
         setMessage("Daily News Brief 設定已更新。");
       } catch (requestError) {
-        setError(requestError instanceof Error ? requestError.message : "儲存 Daily News 設定失敗");
+        setError(formatDailyNewsError(requestError, "儲存 Daily News 設定失敗"));
       }
     });
   }
@@ -178,7 +202,7 @@ export default function OpenClawDailyNewsPage() {
         setActiveRun(run);
         setRuns(await fetchWorkflowRuns({ instanceId: selectedInstanceId, workflowType: "news_brief", limit: 8 }));
       } catch (requestError) {
-        setError(requestError instanceof Error ? requestError.message : "手動執行 Daily News Brief 失敗");
+        setError(formatDailyNewsError(requestError, "手動執行 Daily News Brief 失敗"));
       }
     });
   }
@@ -186,15 +210,25 @@ export default function OpenClawDailyNewsPage() {
   return (
     <OpenClawPageShell
       title="Daily News Brief"
-      description="設定每日新聞監控條件、Telegram 推送目標與最近一次簡報結果。"
+      description="Daily News Brief 是 OpenClaw Control Center 內的 Admin Tools 分區，集中設定每日新聞監控條件、投遞通道與最近一次簡報結果。"
       roles={DAILY_NEWS_ROLES}
+      sectionGroup="Admin Tools"
+      sectionLabel="Daily News Brief"
     >
       <PixelCard title="Daily News 設定" eyebrow="Config">
         <div className="grid gap-4 xl:grid-cols-[260px_minmax(0,1fr)]">
-          <OpenClawInstancePicker instances={instances} value={selectedInstanceId} onChange={setSelectedInstanceId} />
+          <OpenClawInstancePicker
+            instances={instances}
+            value={selectedInstanceId}
+            onChange={setSelectedInstanceId}
+            disabled={!hasInstances || isPending}
+          />
           <div className="border-4 border-ink bg-white px-4 py-3 text-sm leading-7 text-slate-700">
             {error ? <span className="text-coral">{error}</span> : message}
           </div>
+        </div>
+        <div className="mt-3 border-4 border-ink bg-sand px-4 py-3 text-sm font-medium text-slate-700">
+          定時來源：OpenClaw cron。手動執行不受每日自動排程去重限制。
         </div>
 
         <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_220px_220px]">
@@ -274,10 +308,10 @@ export default function OpenClawDailyNewsPage() {
         </div>
 
         <div className="mt-4 flex flex-wrap gap-3">
-          <button type="button" onClick={handleSave} disabled={isPending} className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60">
+          <button type="button" onClick={handleSave} disabled={!canManageDailyNews || isPending} className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60">
             {isPending ? "儲存中..." : "儲存設定"}
           </button>
-          <button type="button" onClick={handleRunNow} disabled={isPending || !selectedInstanceId} className="pixel-button bg-ink px-4 py-3 text-sm font-black tracking-[0.08em] text-sand disabled:opacity-60">
+          <button type="button" onClick={handleRunNow} disabled={isPending || !canManageDailyNews} className="pixel-button bg-ink px-4 py-3 text-sm font-black tracking-[0.08em] text-sand disabled:opacity-60">
             {isPending ? "執行中..." : "手動執行今日簡報"}
           </button>
         </div>

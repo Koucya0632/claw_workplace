@@ -141,6 +141,208 @@ def test_set_config_uses_positional_value_and_strict_json(
     assert "Restart the gateway" in result["message"]
 
 
+def test_run_text_command_uses_explicit_gateway_args(
+    cli_adapter: OpenClawCliAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance = OpenClawInstanceResponse(
+        id="oc_test",
+        name="Primary Gateway",
+        gateway_url="http://127.0.0.1:18789/",
+        is_active=True,
+        has_token=True,
+        last_health_status=None,
+        last_health_checked_at=None,
+        snapshot_summary=OpenClawInstanceSnapshotSummary(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs["env"]
+        return type("Completed", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = cli_adapter._run_text_command(instance, "gateway-token", ["cron", "list", "--json"])  # noqa: SLF001
+
+    assert result == "ok"
+    assert captured["command"] == [
+        cli_adapter.binary,
+        "cron",
+        "list",
+        "--json",
+        "--url",
+        "ws://127.0.0.1:18789",
+        "--token",
+        "gateway-token",
+    ]
+
+
+def test_add_cron_job_uses_single_payload_and_agent_owner(
+    cli_adapter: OpenClawCliAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance = OpenClawInstanceResponse(
+        id="oc_test",
+        name="Primary Gateway",
+        gateway_url="http://127.0.0.1:18789",
+        is_active=True,
+        has_token=True,
+        last_health_status=None,
+        last_health_checked_at=None,
+        snapshot_summary=OpenClawInstanceSnapshotSummary(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    captured_args: list[str] = []
+
+    def fake_run_json_command(instance, token, args):  # noqa: ARG001
+        captured_args[:] = args
+        return {"jobId": "job-1"}
+
+    monkeypatch.setattr(cli_adapter, "_run_json_command", fake_run_json_command)
+
+    result = cli_adapter.add_cron_job(
+        instance,
+        token="gateway-token",
+        name="daily-news:oc_test",
+        cron_expression="0 9 * * *",
+        timezone="Asia/Tokyo",
+        agent_id="daily-news-brief-agent",
+        message="收集并整理每日新闻简报。",
+        announce=True,
+        channel="discord",
+        to="1490256212229488742",
+    )
+
+    assert result == {"jobId": "job-1"}
+    assert captured_args == [
+        "cron",
+        "add",
+        "--json",
+        "--name",
+        "daily-news:oc_test",
+        "--cron",
+        "0 9 * * *",
+        "--tz",
+        "Asia/Tokyo",
+        "--agent",
+        "daily-news-brief-agent",
+        "--message",
+        "收集并整理每日新闻简报。",
+        "--announce",
+        "--channel",
+        "discord",
+        "--to",
+        "1490256212229488742",
+    ]
+
+
+def test_edit_cron_job_drops_json_flag_for_current_cli(
+    cli_adapter: OpenClawCliAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance = OpenClawInstanceResponse(
+        id="oc_test",
+        name="Primary Gateway",
+        gateway_url="http://127.0.0.1:18789",
+        is_active=True,
+        has_token=True,
+        last_health_status=None,
+        last_health_checked_at=None,
+        snapshot_summary=OpenClawInstanceSnapshotSummary(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    captured_args: list[str] = []
+
+    def fake_run_text_command(instance, token, args):  # noqa: ARG001
+        captured_args[:] = args
+        return "updated"
+
+    monkeypatch.setattr(cli_adapter, "_run_text_command", fake_run_text_command)
+
+    result = cli_adapter.edit_cron_job(
+        instance,
+        token="gateway-token",
+        job_id="job-1",
+        name="daily-news:oc_test",
+        cron_expression="0 9 * * *",
+        timezone="Asia/Tokyo",
+        agent_id="daily-news-brief-agent",
+        message="收集并整理每日新闻简报。",
+        announce=True,
+        channel="discord",
+        to="1490256212229488742",
+    )
+
+    assert result == {"message": "updated"}
+    assert captured_args == [
+        "cron",
+        "edit",
+        "job-1",
+        "--name",
+        "daily-news:oc_test",
+        "--cron",
+        "0 9 * * *",
+        "--tz",
+        "Asia/Tokyo",
+        "--agent",
+        "daily-news-brief-agent",
+        "--message",
+        "收集并整理每日新闻简报。",
+        "--announce",
+        "--channel",
+        "discord",
+        "--to",
+        "1490256212229488742",
+    ]
+
+
+def test_list_cron_runs_reads_entries_without_json_flag(
+    cli_adapter: OpenClawCliAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance = OpenClawInstanceResponse(
+        id="oc_test",
+        name="Primary Gateway",
+        gateway_url="http://127.0.0.1:18789",
+        is_active=True,
+        has_token=True,
+        last_health_status=None,
+        last_health_checked_at=None,
+        snapshot_summary=OpenClawInstanceSnapshotSummary(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    captured_args: list[str] = []
+
+    def fake_run_json_command(instance, token, args):  # noqa: ARG001
+        captured_args[:] = args
+        return {"entries": [{"runId": "cron-run-1"}]}
+
+    monkeypatch.setattr(cli_adapter, "_run_json_command", fake_run_json_command)
+
+    result = cli_adapter.list_cron_runs(instance, token="gateway-token", job_id="job-1", limit=8)
+
+    assert result == [{"runId": "cron-run-1"}]
+    assert captured_args == [
+        "cron",
+        "runs",
+        "--limit",
+        "8",
+        "--id",
+        "job-1",
+    ]
+
+
 def test_validate_config_uses_dry_run_set_flow(
     cli_adapter: OpenClawCliAdapter,
     monkeypatch: pytest.MonkeyPatch,

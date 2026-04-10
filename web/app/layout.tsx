@@ -15,7 +15,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="zh-Hant">
       <body>
-        <main className="mx-auto flex min-h-screen max-w-[1600px] flex-col gap-5 p-4 md:p-6">
+        <main className="mx-auto flex min-h-screen max-w-[1680px] flex-col gap-5 px-4 py-4 md:px-6 md:py-5">
           <Navigation />
           {children}
         </main>

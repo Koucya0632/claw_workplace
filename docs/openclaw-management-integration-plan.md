@@ -1,4 +1,4 @@
-# OpenClaw 管理能力整合方案
+# OpenClaw Control Center 整合方案
 
 ## 0. 本次 Phase 1 MVP 已採用的裁剪決策
 
@@ -32,7 +32,7 @@
 
 ## 1. 文件目的
 
-本文件描述如何把官方 `OpenClaw` 的管理能力整合進本專案 `OpenClaw 智能辦公室`，讓本專案從「文件搜索與整理工作台」擴充為「業務系統中的 OpenClaw 管理台 + 任務分發台」。
+本文件描述如何把官方 `OpenClaw` 的管理能力整合進本專案 `OpenClaw 智能辦公室`，讓本專案從「文件搜索與整理工作台」擴充為「業務系統中的 OpenClaw Control Center + 任務分發台」。
 
 本方案的重點不是把 OpenClaw 當成前端元件嵌入，而是把 OpenClaw 當成一個獨立運行的控制平面服務，由本專案提供：
 
@@ -69,7 +69,7 @@
 因此，最合理的整合方式是：
 
 - 把 OpenClaw 視為外部服務
-- 由本專案提供一層 BFF / Admin Console
+- 由本專案提供一層 BFF / Control Center
 - 由本專案代理管理操作與業務事件
 
 ### 2.3 為什麼不建議直接嵌官方 UI
@@ -129,7 +129,7 @@ Browser
 
 本專案內部分層如下：
 
-- `routers/`：提供本專案自己的 OpenClaw 管理 API
+- `routers/`：提供本專案自己的 OpenClaw Control Center API
 - `services/`：封裝業務流程與管理編排
 - `providers/`：必要時容納與 OpenClaw 或其他外部服務的底層協定封裝
 - `repositories/`：保存本專案自己的 OpenClaw 實例資訊、操作紀錄與快照
@@ -263,7 +263,7 @@ Browser
 使用者瀏覽器
   -> 本專案 Web
   -> 本專案 API
-     -> OpenClaw 管理資料庫
+     -> OpenClaw Control Center 資料庫
      -> OpenClaw Gateway 1
      -> OpenClaw Gateway 2
 ```
@@ -821,17 +821,17 @@ doc:{documentId}
 
 ## 20. 結論
 
-本專案若要整合 OpenClaw 管理能力，最佳方案不是把 OpenClaw 當成單一函式庫導入，而是：
+本專案若要整合 OpenClaw Control Center 能力，最佳方案不是把 OpenClaw 當成單一函式庫導入，而是：
 
 - 把 OpenClaw 視為獨立控制平面
-- 由本專案建立管理台與代理 API
+- 由本專案建立 OpenClaw Control Center 與代理 API
 - 第一階段先走 CLI Wrapper + Hooks
 - 第二階段再補 Gateway WebSocket RPC
 
 這樣可以在不破壞現有 `搜索 -> 整理 -> 分析 -> 輸出` 產品方向的前提下，把本專案擴充成同時具備：
 
 - 智能辦公工作台
-- OpenClaw 管理台
+- OpenClaw Control Center
 - 業務事件到 Agent 的任務分發入口
 
 ---

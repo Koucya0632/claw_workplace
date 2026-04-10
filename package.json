@@ -7,10 +7,19 @@
     "build:web": "npm --workspace web run build",
     "lint:web": "npm --workspace web run lint",
     "test:web": "npm --workspace web run test",
-    "test:api": "python3 -m pytest api/app/tests"
+    "test:api": "python3 -m pytest api/app/tests",
+    "dev:control-center-engine": "cross-env UI_MODE=true node --import tsx packages/control-center-engine/src/index.ts",
+    "dev:control-center-ui": "npm run dev:control-center-engine & npm run dev:web & wait",
+    "build:control-center-engine": "tsc -p packages/control-center-engine/tsconfig.json",
+    "test:control-center-engine": "node --import tsx packages/control-center-engine/scripts/run-tests-isolated.ts"
   },
   "workspaces": [
-    "web"
-  ]
+    "web",
+    "packages/control-center-engine"
+  ],
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.2"
+  }
 }
-

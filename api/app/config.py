@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     openclaw_news_agent_dispatch_timeout_seconds: int = Field(default=180, alias="OPENCLAW_NEWS_AGENT_DISPATCH_TIMEOUT_SECONDS")
     openclaw_workflow_dispatch_retry_count: int = Field(default=1, alias="OPENCLAW_WORKFLOW_DISPATCH_RETRY_COUNT")
     openclaw_workflow_dispatch_retry_backoff_ms: int = Field(default=1200, alias="OPENCLAW_WORKFLOW_DISPATCH_RETRY_BACKOFF_MS")
+    openclaw_cron_bridge_poll_seconds: int = Field(default=60, alias="OPENCLAW_CRON_BRIDGE_POLL_SECONDS")
+    openclaw_home: str = Field(default="~/.openclaw", alias="OPENCLAW_HOME")
     openclaw_secret_key: str = Field(default="", alias="OPENCLAW_SECRET_KEY")
     openclaw_agent_tool_api_base_url: str = Field(default="", alias="OPENCLAW_AGENT_TOOL_API_BASE_URL")
     openclaw_agent_search_default_limit: int = Field(default=5, alias="OPENCLAW_AGENT_SEARCH_DEFAULT_LIMIT")
@@ -55,6 +57,8 @@ class Settings(BaseSettings):
     openclaw_system_inspection_telegram_timeout_seconds: int = Field(default=20, alias="OPENCLAW_SYSTEM_INSPECTION_TELEGRAM_TIMEOUT_SECONDS")
     openclaw_system_inspection_discord_bot_token: str = Field(default="", alias="OPENCLAW_SYSTEM_INSPECTION_DISCORD_BOT_TOKEN")
     openclaw_system_inspection_discord_timeout_seconds: int = Field(default=20, alias="OPENCLAW_SYSTEM_INSPECTION_DISCORD_TIMEOUT_SECONDS")
+    openclaw_development_discord_bot_token: str = Field(default="", alias="OPENCLAW_DEVELOPMENT_DISCORD_BOT_TOKEN")
+    openclaw_development_discord_timeout_seconds: int = Field(default=20, alias="OPENCLAW_DEVELOPMENT_DISCORD_TIMEOUT_SECONDS")
 
     # LLM provider 先保留抽象，只在這一版預設選 minimax。
     llm_provider: str = Field(default="minimax", alias="OPENCLAW_LLM_PROVIDER")
@@ -72,6 +76,12 @@ class Settings(BaseSettings):
     def source_root(self) -> Path:
         # 本地資料源根目錄統一轉為絕對路徑，減少每個 connector 自己處理的重複邏輯。
         return Path(self.local_source_base_path).expanduser().resolve()
+
+    @property
+    def openclaw_home_dir(self) -> Path:
+        # OpenClaw runtime config 的預設位置允許被空字串 env 覆蓋，因此這裡補回穩定 fallback。
+        raw_path = self.openclaw_home.strip() or "~/.openclaw"
+        return Path(raw_path).expanduser().resolve()
 
     @property
     def allowed_extension_list(self) -> list[str]:

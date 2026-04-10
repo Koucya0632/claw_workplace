@@ -75,6 +75,19 @@ class DiscordDeliveryClient:
             source_mode="discord_http_system_inspection",
         )
 
+    @classmethod
+    def from_development_settings(cls) -> "DiscordDeliveryClient":
+        from app.config import get_settings
+
+        settings = get_settings()
+        token = settings.openclaw_development_discord_bot_token.strip() or settings.openclaw_daily_news_discord_bot_token
+        timeout_seconds = settings.openclaw_development_discord_timeout_seconds
+        return cls(
+            bot_token=token,
+            timeout_seconds=timeout_seconds,
+            source_mode="discord_http_development",
+        )
+
     def send_text(self, *, channel_id: str, text: str) -> dict[str, object]:
         if not self.bot_token:
             raise OpenClawServiceError(

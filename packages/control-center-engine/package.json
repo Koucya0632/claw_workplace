@@ -1,0 +1,19 @@
+{
+  "name": "@claw-kaisya/control-center-engine",
+  "private": true,
+  "version": "1.0.0",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --import tsx scripts/run-tests-isolated.ts",
+    "dev": "cross-env UI_MODE=true node --import tsx src/index.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "cross-env": "^7.0.3",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.2"
+  }
+}

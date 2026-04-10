@@ -233,8 +233,10 @@ export default function OpenClawKnowledgePage() {
   return (
     <OpenClawPageShell
       title="Knowledge Ingestion"
-      description="這裡現在是知識治理與回看頁：主要查看由 /search 觸發的搜尋即入庫結果、手動接入紀錄、來源重整與文件版本鏈。"
+      description="Knowledge Ingestion 是 OpenClaw Control Center 內的 Admin Tools 分區，主要查看搜尋即入庫結果、手動接入紀錄、來源重整與文件版本鏈。"
       roles={KNOWLEDGE_ROLES}
+      sectionGroup="Admin Tools"
+      sectionLabel="Knowledge Ingestion"
     >
       <PixelCard title="接入工作台" eyebrow="Ingest">
         <div className="border-4 border-ink bg-white px-4 py-3 text-sm leading-7 text-slate-700">

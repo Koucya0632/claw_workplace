@@ -104,7 +104,7 @@ class MockOpenClawHookClient(OpenClawHookClient):
         self.last_wake_payload = payload
         raise OpenClawServiceError(
             "目前這個 OpenClaw 版本未提供可用的 wake 派發入口。",
-            detail="請改用 `openclaw agent` 或在管理台使用 Agent Hook。Wake Hook 已暫時停用。",
+            detail="請改用 `openclaw agent` 或在 OpenClaw Control Center 使用 Agent Hook。Wake Hook 已暫時停用。",
             status_code=501,
             source_mode=self.source_mode,
         )

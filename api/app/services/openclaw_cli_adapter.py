@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from datetime import datetime, timezone
+from urllib.parse import urlsplit, urlunsplit
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -27,6 +29,11 @@ class OpenClawCliAdapter:
     def get_version(self) -> str:
         return self._run_global_text_command(["--version"])
 
+    def get_update_summary(self) -> dict[str, Any]:
+        status_payload = self._run_global_json_command(["status", "--json"])
+        update_payload = self._run_global_json_command(["update", "status", "--json"])
+        return _summarize_openclaw_update(status_payload, update_payload)
+
     def list_agents(self, instance: OpenClawInstanceResponse, token: Optional[str]) -> list[dict[str, Any]]:
         payload = self._run_json_command(instance, token, ["agents", "list", "--json"])
         return _coerce_items(payload)
@@ -47,6 +54,119 @@ class OpenClawCliAdapter:
     def list_devices(self, instance: OpenClawInstanceResponse, token: Optional[str]) -> list[dict[str, Any]]:
         payload = self._run_json_command(instance, token, ["devices", "list", "--json"])
         return _coerce_devices(payload)
+
+    def list_cron_jobs(self, instance: OpenClawInstanceResponse, token: Optional[str]) -> list[dict[str, Any]]:
+        payload = self._run_json_command(instance, token, ["cron", "list", "--json"])
+        return _coerce_items(payload)
+
+    def list_cron_runs(
+        self,
+        instance: OpenClawInstanceResponse,
+        token: Optional[str],
+        *,
+        job_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        args = ["cron", "runs", "--limit", str(limit)]
+        if job_id:
+            args.extend(["--id", job_id])
+        payload = self._run_json_command(instance, token, args)
+        return _coerce_items(payload)
+
+    def add_cron_job(
+        self,
+        instance: OpenClawInstanceResponse,
+        token: Optional[str],
+        *,
+        name: str,
+        cron_expression: str,
+        timezone: str,
+        agent_id: str | None = None,
+        system_event: str | None = None,
+        message: str | None = None,
+        announce: bool = False,
+        channel: str | None = None,
+        to: str | None = None,
+    ) -> dict[str, Any]:
+        args = [
+            "cron",
+            "add",
+            "--json",
+            "--name",
+            name,
+            "--cron",
+            cron_expression,
+            "--tz",
+            timezone,
+        ]
+        if agent_id:
+            args.extend(["--agent", agent_id])
+        if system_event:
+            args.extend(["--system-event", system_event])
+        if message:
+            args.extend(["--message", message])
+        if announce:
+            args.append("--announce")
+        if channel:
+            args.extend(["--channel", channel])
+        if to:
+            args.extend(["--to", to])
+        payload = self._run_json_command(
+            instance,
+            token,
+            args,
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    def edit_cron_job(
+        self,
+        instance: OpenClawInstanceResponse,
+        token: Optional[str],
+        *,
+        job_id: str,
+        name: str,
+        cron_expression: str,
+        timezone: str,
+        agent_id: str | None = None,
+        system_event: str | None = None,
+        message: str | None = None,
+        announce: bool = False,
+        channel: str | None = None,
+        to: str | None = None,
+    ) -> dict[str, Any]:
+        args = [
+            "cron",
+            "edit",
+            job_id,
+            "--name",
+            name,
+            "--cron",
+            cron_expression,
+            "--tz",
+            timezone,
+        ]
+        if agent_id:
+            args.extend(["--agent", agent_id])
+        if system_event:
+            args.extend(["--system-event", system_event])
+        if message:
+            args.extend(["--message", message])
+        if announce:
+            args.append("--announce")
+        if channel:
+            args.extend(["--channel", channel])
+        if to:
+            args.extend(["--to", to])
+        stdout = self._run_text_command(instance, token, args)
+        return {"message": stdout or f"updated cron job {job_id}"}
+
+    def enable_cron_job(self, instance: OpenClawInstanceResponse, token: Optional[str], *, job_id: str) -> dict[str, Any]:
+        stdout = self._run_text_command(instance, token, ["cron", "enable", job_id])
+        return {"message": stdout or f"enabled cron job {job_id}"}
+
+    def disable_cron_job(self, instance: OpenClawInstanceResponse, token: Optional[str], *, job_id: str) -> dict[str, Any]:
+        stdout = self._run_text_command(instance, token, ["cron", "disable", job_id])
+        return {"message": stdout or f"disabled cron job {job_id}"}
 
     def approve_device(self, instance: OpenClawInstanceResponse, token: Optional[str], device_id: str) -> dict[str, Any]:
         return self._run_json_command(instance, token, ["devices", "approve", device_id, "--json"])
@@ -198,15 +318,9 @@ class OpenClawCliAdapter:
         token: Optional[str],
         args: list[str],
     ) -> str:
-        # config set / dry-run 在 2026.4.1 會回純文字成功訊息，因此抽一層純文字執行器共用。
-        env = {
-            "OPENCLAW_GATEWAY_URL": instance.gateway_url,
-        }
-
-        if token:
-            env["OPENCLAW_GATEWAY_TOKEN"] = token
-
-        return self._run_command([self.binary, *args], env)
+        # 新版 CLI 對 gateway override 需要顯式 --url / --token，單靠 env 可能被視為未授權 override。
+        command = [self.binary, *args, *_build_gateway_connection_args(instance.gateway_url, token)]
+        return self._run_command(command, {})
 
     def _run_global_text_command(self, args: list[str]) -> str:
         return self._run_command([self.binary, *args], {})
@@ -284,11 +398,13 @@ class OpenClawCliAdapter:
 
 
 def _coerce_items(payload: Any) -> list[dict[str, Any]]:
-    # 實際 CLI 與測試替身可能有不同包裝層，這裡先容忍 list 或 {items: list} 兩種形狀。
+    # 實際 CLI 與測試替身可能有不同包裝層，這裡容忍常見的 list / items / jobs / runs。
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
-    if isinstance(payload, dict) and isinstance(payload.get("items"), list):
-        return [item for item in payload["items"] if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("items", "jobs", "runs", "entries"):
+            if isinstance(payload.get(key), list):
+                return [item for item in payload[key] if isinstance(item, dict)]
     return []
 
 
@@ -370,8 +486,68 @@ def _coerce_logs(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized_logs
 
 
+def _build_gateway_connection_args(gateway_url: str, token: Optional[str]) -> list[str]:
+    normalized_url = _normalize_gateway_cli_url(gateway_url)
+    args: list[str] = []
+    if normalized_url:
+        args.extend(["--url", normalized_url])
+    if token:
+        args.extend(["--token", token])
+    return args
+
+
+def _normalize_gateway_cli_url(gateway_url: str) -> str:
+    raw = gateway_url.strip()
+    if not raw:
+        return ""
+
+    parsed = urlsplit(raw)
+    if not parsed.scheme:
+        return raw.rstrip("/")
+
+    scheme = parsed.scheme.lower()
+    if scheme == "http":
+        scheme = "ws"
+    elif scheme == "https":
+        scheme = "wss"
+
+    normalized = parsed._replace(scheme=scheme)
+    return urlunsplit(normalized).rstrip("/")
+
+
 def _slugify(value: str) -> str:
     # workspace 路徑只保留安全字元，避免 agent 名稱含空白或符號導致路徑混亂。
     sanitized = "".join(character.lower() if character.isalnum() else "-" for character in value)
     collapsed = "-".join(segment for segment in sanitized.split("-") if segment)
     return collapsed or "agent"
+
+
+def _summarize_openclaw_update(status_json: Any, update_json: Any) -> dict[str, Any]:
+    status_root = status_json if isinstance(status_json, dict) else {}
+    update_root = update_json if isinstance(update_json, dict) else {}
+    update_status = update_root.get("update") if isinstance(update_root.get("update"), dict) else {}
+    availability = update_root.get("availability") if isinstance(update_root.get("availability"), dict) else {}
+    channel = update_root.get("channel") if isinstance(update_root.get("channel"), dict) else {}
+    registry = update_status.get("registry") if isinstance(update_status.get("registry"), dict) else {}
+
+    latest_version = _as_string(availability.get("latestVersion")) or _as_string(registry.get("latestVersion"))
+    current_version = _as_string(status_root.get("runtimeVersion"))
+    update_available = availability.get("available") is True
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "status": "available" if update_available else ("ok" if current_version else ("info" if latest_version else "unknown")),
+        "current_version": current_version,
+        "latest_version": latest_version,
+        "channel_label": _as_string(channel.get("label")),
+        "update_available": update_available,
+        "install_kind": _as_string(update_status.get("installKind")),
+        "package_manager": _as_string(update_status.get("packageManager")),
+    }
+
+
+def _as_string(value: Any) -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    return None

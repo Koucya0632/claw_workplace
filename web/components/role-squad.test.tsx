@@ -6,8 +6,7 @@ import { RoleSquad } from "@/components/role-squad";
 
 
 describe("RoleSquad", () => {
-  it("renders role names and quotes", () => {
-    // 角色小隊是首頁與多個頁面的共用視覺核心，先驗證基本內容渲染。
+  it("renders role names without long quote copy", () => {
     render(
       <RoleSquad
         roles={[
@@ -22,6 +21,7 @@ describe("RoleSquad", () => {
     );
 
     expect(screen.getByText("Chief Lobster")).toBeInTheDocument();
-    expect(screen.getByText("我會安排任務流程。")).toBeInTheDocument();
+    expect(screen.getByText("任務調度")).toBeInTheDocument();
+    expect(screen.queryByText("我會安排任務流程。")).not.toBeInTheDocument();
   });
 });

@@ -9,6 +9,7 @@ import { WorkflowEventTimeline } from "@/components/workflow-event-timeline";
 import { WorkflowReportPanel } from "@/components/workflow-report-panel";
 import { WorkflowRunList } from "@/components/workflow-run-list";
 import { WorkflowStageBoard } from "@/components/workflow-stage-board";
+import { summarizeWorkflowRuntimeIssue } from "@/lib/workflow-payloads";
 import {
   createSystemInspectionWorkflow,
   fetchOpenClawInstances,
@@ -46,6 +47,11 @@ const INSPECTION_ROLES = [
   { name: "Delivery", tagline: "Telegram / Discord 摘要", status: "ready", quote: "巡檢完成後可把摘要推送到 Telegram 或 Discord，讓你快速知道是否升級與先修什麼。" }
 ];
 
+function formatInspectionError(error: unknown, fallback: string) {
+  if (!(error instanceof Error)) return fallback;
+  return summarizeWorkflowRuntimeIssue(error.message, "System Inspection agent") ?? error.message;
+}
+
 export default function OpenClawSystemInspectionPage() {
   const [instances, setInstances] = useState<OpenClawInstanceResponse[]>([]);
   const [selectedInstanceId, setSelectedInstanceId] = useState("");
@@ -53,8 +59,10 @@ export default function OpenClawSystemInspectionPage() {
   const [runs, setRuns] = useState<WorkflowRunResponse[]>([]);
   const [activeRun, setActiveRun] = useState<WorkflowRunResponse | null>(null);
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("你可以手動執行一次巡檢，也可以每天固定時間自動跑版本與日誌風險評估。");
+  const [message, setMessage] = useState("你可以手動執行一次巡檢；固定時間的自動巡檢由 OpenClaw cron 觸發。");
   const [isPending, startTransition] = useTransition();
+  const hasInstances = instances.length > 0;
+  const canManageInspection = Boolean(selectedInstanceId);
 
   useEffect(() => {
     startTransition(async () => {
@@ -62,20 +70,32 @@ export default function OpenClawSystemInspectionPage() {
         const instancePayload = await fetchOpenClawInstances();
         setInstances(instancePayload);
         setSelectedInstanceId((current) => current || instancePayload[0]?.id || "");
+        if (instancePayload.length === 0) {
+          setConfig(DEFAULT_CONFIG);
+          setRuns([]);
+          setActiveRun(null);
+          setMessage("先建立 OpenClaw Instance，再設定 System Inspection。");
+        }
       } catch (requestError) {
-        setError(requestError instanceof Error ? requestError.message : "無法載入 OpenClaw Instances");
+        setError(formatInspectionError(requestError, "無法載入 OpenClaw Instances"));
       }
     });
   }, [startTransition]);
 
   useEffect(() => {
-    if (!selectedInstanceId) return;
+    if (!selectedInstanceId) {
+      setConfig(DEFAULT_CONFIG);
+      setRuns([]);
+      setActiveRun(null);
+      return;
+    }
     startTransition(async () => {
       try {
         const [configResult, runResult] = await Promise.allSettled([
           fetchOpenClawSystemInspectionConfig(selectedInstanceId),
           fetchWorkflowRuns({ instanceId: selectedInstanceId, workflowType: "system_inspection", limit: 8 })
         ]);
+        let nextError = "";
 
         if (configResult.status === "fulfilled") {
           setConfig(configResult.value);
@@ -86,10 +106,14 @@ export default function OpenClawSystemInspectionPage() {
         if (runResult.status === "fulfilled") {
           setRuns(runResult.value);
           setActiveRun(runResult.value[0] ?? null);
+        } else {
+          setRuns([]);
+          setActiveRun(null);
+          nextError = formatInspectionError(runResult.reason, "無法載入系統巡檢資料");
         }
-        setError("");
+        setError(nextError);
       } catch (requestError) {
-        setError(requestError instanceof Error ? requestError.message : "無法載入系統巡檢資料");
+        setError(formatInspectionError(requestError, "無法載入系統巡檢資料"));
       }
     });
   }, [selectedInstanceId, startTransition]);
@@ -102,7 +126,7 @@ export default function OpenClawSystemInspectionPage() {
         setActiveRun(nextRun);
         setRuns(await fetchWorkflowRuns({ instanceId: selectedInstanceId, workflowType: "system_inspection", limit: 8 }));
       } catch (requestError) {
-        setError(requestError instanceof Error ? requestError.message : "輪詢巡檢 run 失敗");
+        setError(formatInspectionError(requestError, "輪詢巡檢 run 失敗"));
       }
     }, 1500);
     return () => window.clearInterval(timer);
@@ -131,7 +155,7 @@ export default function OpenClawSystemInspectionPage() {
         setConfig(saved);
         setMessage("System Inspection 設定已更新。");
       } catch (requestError) {
-        setError(requestError instanceof Error ? requestError.message : "儲存巡檢設定失敗");
+        setError(formatInspectionError(requestError, "儲存巡檢設定失敗"));
       }
     });
   }
@@ -146,7 +170,7 @@ export default function OpenClawSystemInspectionPage() {
         setActiveRun(run);
         setRuns(await fetchWorkflowRuns({ instanceId: selectedInstanceId, workflowType: "system_inspection", limit: 8 }));
       } catch (requestError) {
-        setError(requestError instanceof Error ? requestError.message : "手動執行巡檢失敗");
+        setError(formatInspectionError(requestError, "手動執行巡檢失敗"));
       }
     });
   }
@@ -154,15 +178,25 @@ export default function OpenClawSystemInspectionPage() {
   return (
     <OpenClawPageShell
       title="System Inspection"
-      description="持續檢查 OpenClaw 版本、workflow、plugin、operation logs 與 gateway 異常，並輸出可執行的升級與修復建議。"
+      description="System Inspection 是 OpenClaw Control Center 內的 Admin Tools 分區，持續檢查版本、workflow、plugin、operation logs 與 gateway 異常。"
       roles={INSPECTION_ROLES}
+      sectionGroup="Admin Tools"
+      sectionLabel="System Inspection"
     >
       <PixelCard title="巡檢設定" eyebrow="Config">
         <div className="grid gap-4 xl:grid-cols-[260px_minmax(0,1fr)]">
-          <OpenClawInstancePicker instances={instances} value={selectedInstanceId} onChange={setSelectedInstanceId} />
+          <OpenClawInstancePicker
+            instances={instances}
+            value={selectedInstanceId}
+            onChange={setSelectedInstanceId}
+            disabled={!hasInstances || isPending}
+          />
           <div className="border-4 border-ink bg-white px-4 py-3 text-sm leading-7 text-slate-700">
             {error ? <span className="text-coral">{error}</span> : message}
           </div>
+        </div>
+        <div className="mt-3 border-4 border-ink bg-sand px-4 py-3 text-sm font-medium text-slate-700">
+          定時來源：OpenClaw cron。手動執行不受每日自動排程去重限制。
         </div>
 
         <div className="mt-4 grid gap-4 xl:grid-cols-[220px_220px_minmax(0,1fr)]">
@@ -230,10 +264,10 @@ export default function OpenClawSystemInspectionPage() {
         </div>
 
         <div className="mt-4 flex flex-wrap gap-3">
-          <button type="button" onClick={handleSave} disabled={isPending} className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60">
+          <button type="button" onClick={handleSave} disabled={isPending || !canManageInspection} className="pixel-button bg-coral px-4 py-3 text-sm font-black tracking-[0.08em] text-white disabled:opacity-60">
             {isPending ? "儲存中..." : "儲存設定"}
           </button>
-          <button type="button" onClick={handleRunNow} disabled={isPending || !selectedInstanceId} className="pixel-button bg-ink px-4 py-3 text-sm font-black tracking-[0.08em] text-sand disabled:opacity-60">
+          <button type="button" onClick={handleRunNow} disabled={isPending || !canManageInspection} className="pixel-button bg-ink px-4 py-3 text-sm font-black tracking-[0.08em] text-sand disabled:opacity-60">
             {isPending ? "執行中..." : "手動執行巡檢"}
           </button>
         </div>

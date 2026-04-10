@@ -33,6 +33,7 @@ from app.schemas.openclaw_instance import (
 from app.schemas.openclaw_log import OpenClawLogEntry
 # CLI 適配器，用於與 OpenClaw 互動
 from app.services.openclaw_cli_adapter import OpenClawCliAdapter
+from app.services.openclaw_cron_service import OpenClawCronSchedulingService, summarize_cron_reconcile_error
 # 服務端可能會遇到的錯誤型別
 from app.services.openclaw_errors import OpenClawServiceError
 # 機敏資訊加解密的工具
@@ -48,6 +49,7 @@ class OpenClawInstanceService:
         operation_log_repository: Optional[OpenClawOperationLogRepository] = None,
         cli_adapter: Optional[OpenClawCliAdapter] = None,
         secret_cipher: Optional[OpenClawSecretCipher] = None,
+        cron_scheduling_service: Optional[OpenClawCronSchedulingService] = None,
     ) -> None:
         # 初始化設定
         settings = get_settings()
@@ -56,6 +58,12 @@ class OpenClawInstanceService:
         self.operation_log_repository = operation_log_repository or OpenClawOperationLogRepository()
         self.cli_adapter = cli_adapter or OpenClawCliAdapter()
         self.secret_cipher = secret_cipher or OpenClawSecretCipher(settings.openclaw_secret_key)
+        self.cron_scheduling_service = cron_scheduling_service or OpenClawCronSchedulingService(
+            repository=self.repository,
+            operation_log_repository=self.operation_log_repository,
+            cli_adapter=self.cli_adapter,
+            secret_cipher=self.secret_cipher,
+        )
 
     def list_instances(self) -> list[OpenClawInstanceResponse]:
         # 列出所有 OpenClaw instances
@@ -82,6 +90,20 @@ class OpenClawInstanceService:
             response_summary={"instance_id": instance.id},
             source_mode="repository",
         )
+        try:
+            self.cron_scheduling_service.reconcile_instance(instance.id)
+        except Exception as error:  # noqa: BLE001
+            self.operation_log_repository.create(
+                instance_id=instance.id,
+                operation_type="create_instance_cron_reconcile",
+                target_type="instance",
+                target_id=instance.id,
+                status="failed",
+                error_message=summarize_cron_reconcile_error(error),
+                request_summary={"instance_id": instance.id},
+                response_summary=None,
+                source_mode="repository",
+            )
         return instance
 
     def update_instance(self, instance_id: str, payload: OpenClawInstanceUpdateRequest) -> OpenClawInstanceResponse:
@@ -111,6 +133,20 @@ class OpenClawInstanceService:
             response_summary={"instance_id": instance.id},
             source_mode="repository",
         )
+        try:
+            self.cron_scheduling_service.reconcile_instance(instance.id)
+        except Exception as error:  # noqa: BLE001
+            self.operation_log_repository.create(
+                instance_id=instance.id,
+                operation_type="update_instance_cron_reconcile",
+                target_type="instance",
+                target_id=instance.id,
+                status="failed",
+                error_message=summarize_cron_reconcile_error(error),
+                request_summary={"instance_id": instance.id},
+                response_summary=None,
+                source_mode="repository",
+            )
         return instance
 
     def check_health(self, instance_id: str) -> tuple[OpenClawHealthResponse, int]:
